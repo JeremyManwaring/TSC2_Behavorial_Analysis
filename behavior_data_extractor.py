@@ -750,7 +750,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     parser = _build_parser()
-    args = parser.parse_args()
+    # Jupyter/Colab inject kernel args (for example, "-f <kernel.json>").
+    # Ignore unknown args so this entrypoint is notebook-safe.
+    args, _unknown = parser.parse_known_args()
     day_folder = args.day if args.mode == "day" else None
     anchor_day = args.anchor_day if args.anchor_day is not None else (args.day if args.mode == "week" else None)
     result = extract_behavior_data(
