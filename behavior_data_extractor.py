@@ -596,6 +596,381 @@ def _first_nonnegative(values: object) -> float:
     return float("nan")
 
 
+def _safe_float(value: object, default: float = 0.0) -> float:
+    numeric = pd.to_numeric(value, errors="coerce")
+    if pd.isna(numeric):
+        return float(default)
+    return float(numeric)
+
+
+def calculate_dprime(hits: int, misses: int, false_alarms: int, correct_rejections: int) -> Tuple[float, float, float]:
+    from statistics import NormalDist
+
+    hit_rate = hits / (hits + misses) if (hits + misses) > 0 else 0.0
+    fa_rate = false_alarms / (false_alarms + correct_rejections) if (false_alarms + correct_rejections) > 0 else 0.0
+    hit_rate = min(max(hit_rate, 1e-5), 1 - 1e-5)
+    fa_rate = min(max(fa_rate, 1e-5), 1 - 1e-5)
+    dist = NormalDist()
+    return float(dist.inv_cdf(hit_rate) - dist.inv_cdf(fa_rate)), float(hit_rate), float(fa_rate)
+
+
+def session_summary(trials: pd.DataFrame) -> Dict[str, float]:
+    if trials.empty:
+        return {
+            "Abortflag": 0.0,
+            "TotalTrials": 0.0,
+            "GoTrials": 0.0,
+            "NoGoTrials": 0.0,
+            "Hit": 0.0,
+            "Miss": 0.0,
+            "CorrectReject": 0.0,
+            "FalseAlarm": 0.0,
+            "HitPct": 0.0,
+            "MissPct": 0.0,
+            "CorrectRejectPct": 0.0,
+            "FalseAlarmPct": 0.0,
+        }
+
+    tr_type = pd.to_numeric(trials.get("TrType"), errors="coerce").fillna(-1).astype(int)
+    outcome = pd.to_numeric(trials.get("TrOutcome"), errors="coerce").fillna(-1).astype(int)
+
+    go_trials = int((tr_type == 1).sum())
+    nogo_trials = int((tr_type == 0).sum())
+    hit = int((outcome == 1).sum())
+    correct_reject = int((outcome == 2).sum())
+    false_alarm = int((outcome == 3).sum())
+    miss = int((outcome == 4).sum())
+    abort_flag = 1 if int((outcome == 6).sum()) > 0 else 0
+
+    hit_pct = round((hit / go_trials) * 100, 1) if go_trials > 0 else 0.0
+    miss_pct = round((miss / go_trials) * 100, 1) if go_trials > 0 else 0.0
+    cr_pct = round((correct_reject / nogo_trials) * 100, 1) if nogo_trials > 0 else 0.0
+    fa_pct = round((false_alarm / nogo_trials) * 100, 1) if nogo_trials > 0 else 0.0
+
+    return {
+        "Abortflag": float(abort_flag),
+        "TotalTrials": float(len(trials)),
+        "GoTrials": float(go_trials),
+        "NoGoTrials": float(nogo_trials),
+        "Hit": float(hit),
+        "Miss": float(miss),
+        "CorrectReject": float(correct_reject),
+        "FalseAlarm": float(false_alarm),
+        "HitPct": float(hit_pct),
+        "MissPct": float(miss_pct),
+        "CorrectRejectPct": float(cr_pct),
+        "FalseAlarmPct": float(fa_pct),
+    }
+
+
+def print_session_summary(trials: pd.DataFrame) -> Dict[str, float]:
+    summary = session_summary(trials)
+    print("=" * 40)
+    print("SESSION SUMMARY")
+    print("=" * 40)
+    print(f"Abortflag is {int(summary['Abortflag'])}")
+    print(f"The number of Go trials is {int(summary['GoTrials'])}")
+    print(f"The number of No Go trials is {int(summary['NoGoTrials'])}")
+    print(f"The number of Hit trials is {int(summary['Hit'])}")
+    print(f"The number of Miss trials is {int(summary['Miss'])}")
+    print(f"The number of Correct Rejections trials is {int(summary['CorrectReject'])}")
+    print(f"The number of False Alarm trials is {int(summary['FalseAlarm'])}\n")
+    print(f"The % of Hit trials is {summary['HitPct']}")
+    print(f"The % of Miss trials is {summary['MissPct']}")
+    print(f"The % of Correct Rejections trials is {summary['CorrectRejectPct']}")
+    print(f"The % of False Alarm trials is {summary['FalseAlarmPct']}\n")
+    return summary
+
+
+def _trial_lookup(analysis: AnalysisData) -> Dict[Tuple[str, int], pd.Series]:
+    lookup: Dict[Tuple[str, int], pd.Series] = {}
+    if analysis.trials.empty:
+        return lookup
+    for _, row in analysis.trials.iterrows():
+        session_id = str(row.get("session_id", ""))
+        tr_num = pd.to_numeric(row.get("TrNum"), errors="coerce")
+        if pd.isna(tr_num):
+            continue
+        lookup[(session_id, int(tr_num))] = row
+    return lookup
+
+
+def _first_lick_metrics(analysis: AnalysisData) -> pd.DataFrame:
+    cols = [
+        "FirstLick_RelativeTrial",
+        "FirstLick_RelativeEndTrial",
+        "StimRelativeTrial",
+        "RWRelativeTrial",
+        "Aborted",
+    ]
+    if analysis.lick_df.empty:
+        return pd.DataFrame(columns=cols)
+
+    trial_map = _trial_lookup(analysis)
+    rows: List[Dict[str, object]] = []
+
+    for _, lick_row in analysis.lick_df.iterrows():
+        lick_times = lick_row.get("lick_times_rel_stim_ms")
+        first_rel_stim = _first_nonnegative(lick_times)
+        if pd.isna(first_rel_stim):
+            continue
+
+        session_id = str(lick_row.get("session_id", ""))
+        tr_num = pd.to_numeric(lick_row.get("TrNum"), errors="coerce")
+        if pd.isna(tr_num):
+            continue
+        trial = trial_map.get((session_id, int(tr_num)))
+        if trial is None:
+            continue
+
+        tr_start = _safe_float(trial.get("TrStartTime"), default=0.0)
+        stim_on = _safe_float(trial.get("StimOnsetTime"), default=0.0)
+        rw_start = _safe_float(trial.get("RWStartTime"), default=0.0)
+        tr_end = _safe_float(trial.get("TrEndTime"), default=0.0)
+        outcome_num = pd.to_numeric(trial.get("TrOutcome"), errors="coerce")
+        outcome = int(outcome_num) if not pd.isna(outcome_num) else -1
+
+        first_rel_trial_sec = (first_rel_stim + (stim_on - tr_start)) / 1000.0
+        trial_dur_sec = (tr_end - tr_start) / 1000.0
+
+        rows.append(
+            {
+                "FirstLick_RelativeTrial": float(first_rel_trial_sec),
+                "FirstLick_RelativeEndTrial": float(first_rel_trial_sec - trial_dur_sec),
+                "StimRelativeTrial": float((stim_on - tr_start) / 1000.0),
+                "RWRelativeTrial": float((rw_start - tr_start) / 1000.0),
+                "Aborted": outcome == 6,
+            }
+        )
+
+    return pd.DataFrame(rows, columns=cols)
+
+
+def plot_first_lick_histogram(analysis: AnalysisData, ax=None) -> None:
+    import matplotlib.pyplot as plt
+
+    df = _first_lick_metrics(analysis)
+    if df.empty:
+        if ax is not None:
+            ax.text(0.5, 0.5, "No first-lick data", ha="center", va="center", transform=ax.transAxes)
+            ax.set_axis_off()
+        else:
+            print("No first-lick data.")
+        return
+
+    df = df[(df["FirstLick_RelativeTrial"] >= 0) & (df["FirstLick_RelativeEndTrial"] <= 1)].copy()
+    if df.empty:
+        if ax is not None:
+            ax.text(0.5, 0.5, "No filtered first-lick data", ha="center", va="center", transform=ax.transAxes)
+            ax.set_axis_off()
+        else:
+            print("No filtered first-lick data.")
+        return
+
+    own_fig = False
+    if ax is None:
+        own_fig = True
+        fig, ax = plt.subplots(figsize=(9, 6))
+
+    aborted_false = df[df["Aborted"] == False]["FirstLick_RelativeTrial"]  # noqa: E712
+    aborted_true = df[df["Aborted"] == True]["FirstLick_RelativeTrial"]  # noqa: E712
+    ax.hist(aborted_false, bins=40, alpha=0.7, label="Aborted=False", color="#1f77b4")
+    if not aborted_true.empty:
+        ax.hist(aborted_true, bins=40, alpha=0.55, label="Aborted=True", color="#9aa0a6")
+
+    most_common_rw = float(df["RWRelativeTrial"].mode().iloc[0]) if not df["RWRelativeTrial"].mode().empty else 0.0
+    most_common_stim = float(df["StimRelativeTrial"].mode().iloc[0]) if not df["StimRelativeTrial"].mode().empty else 0.0
+    ax.axvline(x=most_common_stim, color="red", linestyle="dashed", label="Stim Onset", linewidth=2)
+    ax.axvspan(most_common_rw, most_common_rw + 2, color="gray", alpha=0.20, label="Reward Window")
+
+    ax.set_title("Time to First Lick in Trial")
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Count")
+    ax.legend(loc="best")
+    ax.grid(alpha=0.2)
+
+    if own_fig:
+        plt.tight_layout()
+        plt.show()
+
+
+def _trial_licks_by_key(analysis: AnalysisData) -> Dict[Tuple[str, int], List[float]]:
+    by_key: Dict[Tuple[str, int], List[float]] = {}
+    if analysis.lick_df.empty:
+        return by_key
+    for _, row in analysis.lick_df.iterrows():
+        session_id = str(row.get("session_id", ""))
+        tr_num = pd.to_numeric(row.get("TrNum"), errors="coerce")
+        if pd.isna(tr_num):
+            continue
+        key = (session_id, int(tr_num))
+        licks = row.get("lick_times_rel_stim_ms")
+        if not isinstance(licks, list):
+            continue
+        cleaned: List[float] = []
+        for lick in licks:
+            try:
+                value = float(lick)
+            except Exception:
+                continue
+            if pd.isna(value):
+                continue
+            cleaned.append(value)
+        if key not in by_key:
+            by_key[key] = []
+        by_key[key].extend(cleaned)
+    return by_key
+
+
+def plot_lick_raster(analysis: AnalysisData, ax=None, max_trials: int = 200) -> None:
+    import matplotlib.pyplot as plt
+
+    trials = _ordered_trials(analysis.trials)
+    needed_cols = {"session_id", "TrNum", "TrStartTime", "TrEndTime", "StimOnsetTime"}
+    if trials.empty or not needed_cols.issubset(set(trials.columns)):
+        if ax is not None:
+            ax.text(0.5, 0.5, "No lick raster data", ha="center", va="center", transform=ax.transAxes)
+            ax.set_axis_off()
+        else:
+            print("No lick raster data.")
+        return
+
+    trials = trials.head(max_trials).copy()
+    lick_map = _trial_licks_by_key(analysis)
+
+    own_fig = False
+    if ax is None:
+        own_fig = True
+        fig, ax = plt.subplots(figsize=(11, 6))
+
+    max_time = 0.0
+    for plot_idx, (_, tr_row) in enumerate(trials.iterrows()):
+        session_id = str(tr_row["session_id"])
+        tr_num_num = pd.to_numeric(tr_row["TrNum"], errors="coerce")
+        if pd.isna(tr_num_num):
+            continue
+        tr_num = int(tr_num_num)
+        tr_start = _safe_float(tr_row["TrStartTime"], default=0.0)
+        tr_end = _safe_float(tr_row["TrEndTime"], default=0.0)
+        stim_on = _safe_float(tr_row["StimOnsetTime"], default=0.0)
+        stim_rel_trial = stim_on - tr_start
+
+        trial_dur_sec = max((tr_end - tr_start) / 1000.0, 0.0)
+        ax.hlines(y=plot_idx, xmin=0, xmax=trial_dur_sec, color="gray", alpha=0.15, linewidth=6)
+        max_time = max(max_time, trial_dur_sec)
+
+        licks_rel_stim = lick_map.get((session_id, tr_num), [])
+        if licks_rel_stim:
+            aligned_licks = [(lick + stim_rel_trial) / 1000.0 for lick in licks_rel_stim]
+            aligned_licks = [lick for lick in aligned_licks if lick >= -0.5]
+            if aligned_licks:
+                ax.vlines(aligned_licks, ymin=plot_idx - 0.4, ymax=plot_idx + 0.4, color="black", alpha=0.8)
+                max_time = max(max_time, max(aligned_licks))
+
+    ax.set_xlabel("Time from Trial Start (s)")
+    ax.set_ylabel("Trial Number")
+    title_suffix = f" (first {len(trials)} trials)" if len(trials) < len(analysis.trials) else ""
+    ax.set_title(f"Lick Raster Plot{title_suffix}")
+    ax.set_xlim([-0.5, max_time + 0.5])
+    ax.invert_yaxis()
+    ax.grid(alpha=0.2, axis="x")
+
+    if own_fig:
+        plt.tight_layout()
+        plt.show()
+
+
+def plot_dprime_and_rates(analysis: AnalysisData, window_size: int = 10) -> None:
+    import matplotlib.pyplot as plt
+
+    trials = _ordered_trials(analysis.trials)
+    if trials.empty or "TrType" not in trials.columns or "TrOutcome" not in trials.columns:
+        print("No d' data available.")
+        return
+
+    tr_type = pd.to_numeric(trials["TrType"], errors="coerce").fillna(-1).astype(int)
+    outcome = pd.to_numeric(trials["TrOutcome"], errors="coerce").fillna(-1).astype(int)
+
+    total_trial_num = len(trials)
+    if total_trial_num < window_size:
+        window_size = max(1, total_trial_num)
+
+    dprime_list: List[float] = []
+    hit_rate_list: List[float] = []
+    fa_rate_list: List[float] = []
+    trial_axis: List[int] = []
+
+    for i in range(total_trial_num - window_size + 1):
+        block_type = tr_type.iloc[i : i + window_size]
+        block_outcome = outcome.iloc[i : i + window_size]
+
+        hits = int(((block_type == 1) & (block_outcome == 1)).sum())
+        misses = int(((block_type == 1) & (block_outcome == 4)).sum())
+        cr = int(((block_type == 0) & (block_outcome == 2)).sum())
+        fa = int(((block_type == 0) & (block_outcome == 3)).sum())
+
+        dprime, hr, far = calculate_dprime(hits, misses, fa, cr)
+        dprime_list.append(dprime)
+        hit_rate_list.append(hr)
+        fa_rate_list.append(far)
+        trial_axis.append(i + window_size)
+
+    fig, ax1 = plt.subplots(figsize=(11, 6))
+    line1 = ax1.plot(trial_axis, dprime_list, color="#5e5656", label="Rolling d'", linewidth=2.2)
+    ax1.set_xlabel("Trial Number")
+    ax1.set_ylabel("d'")
+
+    ax2 = ax1.twinx()
+    line2 = ax2.plot(trial_axis, hit_rate_list, color="#1f77b4", label="Rolling Hit Rate", linewidth=2.2)
+    line3 = ax2.plot(trial_axis, fa_rate_list, color="#ea6161", label="Rolling FA Rate", linewidth=2.2)
+    ax2.set_ylabel("Rates")
+    ax2.set_ylim([-0.1, 1.1])
+
+    lines = line1 + line2 + line3
+    labels = [line.get_label() for line in lines]
+    ax1.legend(lines, labels, loc="upper right")
+    plt.title(f"Rolling d', Hit Rate, and False Alarm Rate (window={window_size})")
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_performance_bars(analysis: AnalysisData) -> None:
+    import matplotlib.pyplot as plt
+
+    summary = session_summary(analysis.trials)
+    labels = ["Hit", "Miss", "False Alarm", "Correct Rejection"]
+    rates = [summary["HitPct"], summary["MissPct"], summary["FalseAlarmPct"], summary["CorrectRejectPct"]]
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    bars = ax.bar(labels, rates, color=["#1f77b4", "#3f4240", "#ea6161", "#62d18d"])
+    ax.set_ylabel("Rate (%)")
+    ax.set_title("Hit/Miss/False Alarm/Correct Rejection Rates")
+    ax.set_ylim([0, max(100.0, max(rates) + 10)])
+
+    for bar in bars:
+        height = float(bar.get_height())
+        ax.annotate(
+            f"{height:.2f}",
+            xy=(bar.get_x() + bar.get_width() / 2, height),
+            xytext=(0, 3),
+            textcoords="offset points",
+            ha="center",
+            va="bottom",
+            fontsize=10,
+        )
+
+    plt.tight_layout()
+    plt.show()
+
+
+def run_one_day_analysis_suite(analysis: AnalysisData, window_size: int = 10) -> None:
+    print_session_summary(analysis.trials)
+    plot_first_lick_histogram(analysis)
+    plot_lick_raster(analysis)
+    plot_dprime_and_rates(analysis, window_size=window_size)
+    plot_performance_bars(analysis)
+
+
 def plot_scope_overview(analysis: AnalysisData, rolling_window: int = 20) -> None:
     import matplotlib.pyplot as plt
 
@@ -646,20 +1021,16 @@ def plot_scope_overview(analysis: AnalysisData, rolling_window: int = 20) -> Non
     axes[0, 1].set_title("Outcome Counts")
     axes[0, 1].tick_params(axis="x", rotation=20)
 
-    if "date" in trials.columns:
-        daily_counts = trials.groupby("date").size()
-        axes[1, 0].plot(daily_counts.index.astype(str), daily_counts.values, marker="o", color="#5e5656")
-    axes[1, 0].set_title("Trials per Day")
-    axes[1, 0].set_xlabel("Date")
-    axes[1, 0].set_ylabel("Trials")
-    axes[1, 0].tick_params(axis="x", rotation=45)
-    axes[1, 0].grid(alpha=0.3)
+    plot_lick_raster(analysis, ax=axes[1, 0], max_trials=120)
 
     if not first_lick_sec.empty:
         axes[1, 1].hist(first_lick_sec, bins=30, color="#457b9d", alpha=0.85)
-    axes[1, 1].set_title("First Lick Latency (>= 0s)")
-    axes[1, 1].set_xlabel("Seconds from stimulus")
-    axes[1, 1].set_ylabel("Count")
+        axes[1, 1].set_title("First Lick Latency (>= 0s)")
+        axes[1, 1].set_xlabel("Seconds from stimulus")
+        axes[1, 1].set_ylabel("Count")
+    else:
+        axes[1, 1].text(0.5, 0.5, "No first-lick data", ha="center", va="center", transform=axes[1, 1].transAxes)
+        axes[1, 1].set_axis_off()
 
     fig.suptitle(
         f"{analysis.extraction.mode.upper()} scope overview | "

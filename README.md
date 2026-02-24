@@ -64,6 +64,7 @@ Inside the popup you can:
 - `week` (anchor day and previous 6 days)
 - `all` (all folders)
 - auto-render labeled and separated sections for `day`, `week`, and `all`
+- overview now uses a lick raster panel (replacing `Trials per Day`)
 
 After loading, all scope-specific data is available:
 
@@ -103,6 +104,14 @@ Legacy single-scope loading is still available:
 from behavior_data_extractor import load_into_namespace
 
 analysis = load_into_namespace("Jeremy", mode="week")
+```
+
+One-day full analysis suite (compatible with the original workflow) is available:
+
+```python
+from behavior_data_extractor import run_one_day_analysis_suite
+
+run_one_day_analysis_suite(context.day, window_size=10)
 ```
 
 ### CLI usage
