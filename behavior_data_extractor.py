@@ -924,7 +924,15 @@ def plot_dprime_and_rates(analysis: AnalysisData, window_size: int = 10) -> None
     line2 = ax2.plot(trial_axis, hit_rate_list, color="#1f77b4", label="Rolling Hit Rate", linewidth=2.2)
     line3 = ax2.plot(trial_axis, fa_rate_list, color="#ea6161", label="Rolling FA Rate", linewidth=2.2)
     ax2.set_ylabel("Rates")
-    ax2.set_ylim([-0.1, 1.1])
+    rate_values = pd.Series(hit_rate_list + fa_rate_list, dtype=float)
+    rate_values = pd.to_numeric(rate_values, errors="coerce").replace([float("inf"), float("-inf")], pd.NA).dropna()
+    if not rate_values.empty:
+        y_min = min(0.0, float(rate_values.min()))
+        y_max = max(1.0, float(rate_values.max()))
+        pad = 0.05 * max(1.0, y_max - y_min)
+        ax2.set_ylim([y_min - pad, y_max + pad])
+    else:
+        ax2.set_ylim([-0.05, 1.05])
 
     lines = line1 + line2 + line3
     labels = [line.get_label() for line in lines]
@@ -971,6 +979,59 @@ def run_one_day_analysis_suite(analysis: AnalysisData, window_size: int = 10) ->
     plot_performance_bars(analysis)
 
 
+def _plot_outcome_panel(trials: pd.DataFrame, mode: str, ax) -> None:
+    valid_outcomes = ["Hit", "Miss", "False Alarm", "Correct Reject"]
+    colors = {
+        "Hit": "#2a9d8f",
+        "Miss": "#9aa0a6",
+        "False Alarm": "#e76f51",
+        "Correct Reject": "#264653",
+    }
+
+    if "outcome_label" not in trials.columns:
+        ax.text(0.5, 0.5, "No outcome labels", ha="center", va="center", transform=ax.transAxes)
+        ax.set_axis_off()
+        return
+
+    filtered_trials = trials[trials["outcome_label"].isin(valid_outcomes)].copy()
+    if filtered_trials.empty:
+        ax.text(0.5, 0.5, "No outcome data", ha="center", va="center", transform=ax.transAxes)
+        ax.set_axis_off()
+        return
+
+    if mode == "week" and "date" in filtered_trials.columns:
+        by_date = (
+            filtered_trials.groupby(["date", "outcome_label"])
+            .size()
+            .unstack(fill_value=0)
+            .reindex(columns=valid_outcomes, fill_value=0)
+            .sort_index()
+        )
+
+        x_labels = by_date.index.astype(str)
+        for outcome in valid_outcomes:
+            ax.plot(
+                x_labels,
+                by_date[outcome].values,
+                marker="o",
+                linewidth=2.0,
+                color=colors[outcome],
+                label=outcome,
+            )
+        ax.set_title("Outcome Change Over 7-Day Window")
+        ax.set_xlabel("Date")
+        ax.set_ylabel("Count")
+        ax.tick_params(axis="x", rotation=30)
+        ax.grid(alpha=0.3)
+        ax.legend(loc="best")
+        return
+
+    counts = filtered_trials["outcome_label"].value_counts().reindex(valid_outcomes, fill_value=0)
+    ax.bar(counts.index, counts.values, color=[colors[label] for label in counts.index])
+    ax.set_title("Outcome Counts")
+    ax.tick_params(axis="x", rotation=20)
+
+
 def plot_scope_overview(analysis: AnalysisData, rolling_window: int = 20) -> None:
     import matplotlib.pyplot as plt
 
@@ -994,10 +1055,6 @@ def plot_scope_overview(analysis: AnalysisData, rolling_window: int = 20) -> Non
         hit_rate = pd.Series(index=trials.index, dtype=float)
         fa_rate = pd.Series(index=trials.index, dtype=float)
 
-    outcome_counts = pd.Series(dtype=int)
-    if "outcome_label" in trials.columns:
-        outcome_counts = trials["outcome_label"].fillna("Unknown").value_counts()
-
     first_lick_sec = pd.Series(dtype=float)
     if not analysis.lick_df.empty and "lick_times_rel_stim_ms" in analysis.lick_df.columns:
         first_lick_ms = analysis.lick_df["lick_times_rel_stim_ms"].apply(_first_nonnegative)
@@ -1010,16 +1067,19 @@ def plot_scope_overview(analysis: AnalysisData, rolling_window: int = 20) -> Non
     axes[0, 0].set_title(f"Rolling Rates (window={rolling_window})")
     axes[0, 0].set_xlabel("Trial")
     axes[0, 0].set_ylabel("Rate")
-    axes[0, 0].set_ylim(0, 1)
+    rolling_values = pd.concat([hit_rate, fa_rate], ignore_index=True)
+    rolling_values = pd.to_numeric(rolling_values, errors="coerce").replace([float("inf"), float("-inf")], pd.NA).dropna()
+    if not rolling_values.empty:
+        y_min = min(0.0, float(rolling_values.min()))
+        y_max = max(1.0, float(rolling_values.max()))
+        pad = 0.05 * max(1.0, y_max - y_min)
+        axes[0, 0].set_ylim(y_min - pad, y_max + pad)
+    else:
+        axes[0, 0].set_ylim(-0.05, 1.05)
     axes[0, 0].legend(loc="best")
     axes[0, 0].grid(alpha=0.3)
 
-    if not outcome_counts.empty:
-        outcome_order = ["Hit", "Miss", "False Alarm", "Correct Reject", "Unknown"]
-        filtered = outcome_counts.reindex([label for label in outcome_order if label in outcome_counts.index]).fillna(0)
-        axes[0, 1].bar(filtered.index, filtered.values, color=["#2a9d8f", "#9aa0a6", "#e76f51", "#264653", "#999999"][: len(filtered)])
-    axes[0, 1].set_title("Outcome Counts")
-    axes[0, 1].tick_params(axis="x", rotation=20)
+    _plot_outcome_panel(trials, analysis.extraction.mode, axes[0, 1])
 
     plot_lick_raster(analysis, ax=axes[1, 0], max_trials=120)
 

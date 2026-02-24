@@ -65,6 +65,8 @@ Inside the popup you can:
 - `all` (all folders)
 - auto-render labeled and separated sections for `day`, `week`, and `all`
 - overview now uses a lick raster panel (replacing `Trials per Day`)
+- week outcome panel is a 7-day time-series line graph (Hit/Miss/False Alarm/Correct Reject only)
+- rolling-rate axes auto-scale to avoid clipping
 
 After loading, all scope-specific data is available:
 
