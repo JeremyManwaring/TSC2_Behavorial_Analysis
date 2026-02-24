@@ -670,6 +670,59 @@ def plot_scope_overview(analysis: AnalysisData, rolling_window: int = 20) -> Non
     plt.show()
 
 
+def _scope_row(label: str, analysis: AnalysisData) -> Dict[str, object]:
+    folders = [folder.name for folder in analysis.extraction.selected_folders]
+    day_min = ""
+    day_max = ""
+    if "date" in analysis.trials.columns and not analysis.trials.empty:
+        non_null_dates = analysis.trials["date"].dropna()
+        if not non_null_dates.empty:
+            day_min = str(non_null_dates.min())
+            day_max = str(non_null_dates.max())
+    return {
+        "scope": label,
+        "folder_count": len(folders),
+        "folders": ", ".join(folders),
+        "trial_rows": len(analysis.trials),
+        "lick_rows": len(analysis.lick_df),
+        "date_min": day_min,
+        "date_max": day_max,
+    }
+
+
+def _display_heading(text: str, level: int = 3) -> None:
+    try:
+        from IPython.display import Markdown, display
+
+        display(Markdown(f"{'#' * max(1, level)} {text}"))
+    except Exception:
+        print(text)
+
+
+def display_all_scope_results(context: AutoExtractionContext, rolling_window: int = 20) -> pd.DataFrame:
+    rows = [
+        _scope_row("day", context.day),
+        _scope_row("week", context.week),
+        _scope_row("all", context.all_time),
+    ]
+    summary_df = pd.DataFrame(rows)
+
+    _display_heading("Extraction Summary", level=3)
+    try:
+        from IPython.display import display
+
+        display(summary_df)
+    except Exception:
+        print(summary_df.to_string(index=False))
+
+    for label, analysis in [("DAY", context.day), ("WEEK", context.week), ("ALL", context.all_time)]:
+        _display_heading(f"{label} Results", level=3)
+        print("folders:", ", ".join(folder.name for folder in analysis.extraction.selected_folders))
+        plot_scope_overview(analysis, rolling_window=rolling_window)
+
+    return summary_df
+
+
 def plot_auto_scope(context: AutoExtractionContext, scope: str = "auto", rolling_window: int = 20) -> str:
     normalized_scope = scope.strip().lower()
     if normalized_scope == "auto":
@@ -716,7 +769,7 @@ def show_extraction_widget(default_folder: Union[str, Path] = "Jeremy"):
     extract_button = widgets.Button(description="Load + Plot", button_style="success")
     apply_scope_button = widgets.Button(description="Apply Default Scope")
     close_button = widgets.Button(description="Close")
-    auto_plot_input = widgets.Checkbox(value=True, description="Auto-plot on load")
+    auto_plot_input = widgets.Checkbox(value=True, description="Show day/week/all plots")
     status = widgets.HTML()
     output = widgets.Output(layout=widgets.Layout(max_height="260px", overflow_y="auto"))
 
@@ -811,9 +864,9 @@ def show_extraction_widget(default_folder: Union[str, Path] = "Jeremy"):
                 print(f"Active alias scope: {context.resolved_scope}")
                 if auto_plot_input.value:
                     print()
-                    print("Rendering overview plots...")
-                    rendered_scope = plot_auto_scope(context, scope=default_scope_input.value)
-                    print(f"Rendered scope: {rendered_scope}")
+                    print("Rendering day/week/all plots...")
+                    summary_df = display_all_scope_results(context)
+                    print(f"Rendered all scopes ({len(summary_df)} rows in summary table).")
             except Exception as exc:
                 print(f"Extraction failed: {exc}")
 

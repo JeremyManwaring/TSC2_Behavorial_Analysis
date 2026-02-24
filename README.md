@@ -30,7 +30,7 @@ Inside the popup you can:
 - `day` (anchor day)
 - `week` (anchor day and previous 6 days)
 - `all` (all folders)
-- auto-render overview graphs for the default scope
+- auto-render labeled and separated sections for `day`, `week`, and `all`
 
 After loading, all scope-specific data is available:
 
@@ -49,11 +49,11 @@ Use `Default: Auto/Day/Week/All` in the popup to control which scope feeds those
 Auto-load everything and set aliases in one call:
 
 ```python
-from behavior_data_extractor import load_auto_context, plot_auto_scope
+from behavior_data_extractor import display_all_scope_results, load_auto_context
 
 context = load_auto_context("Jeremy", selected_day=None, default_scope="auto")
 # selected_day=None uses most recent folder
-plot_auto_scope(context, scope="auto")
+display_all_scope_results(context)
 ```
 
 Manually switch alias scope later:

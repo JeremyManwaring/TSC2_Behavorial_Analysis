@@ -8,7 +8,7 @@ What it does:
 
 Optional:
 - Set DATA_FOLDER to your own Jeremy data folder in Drive.
-- Set AUTO_PRELOAD_AND_PLOT to True to render graphs immediately.
+- Set AUTO_PRELOAD_AND_PLOT to True to render day/week/all graphs immediately.
 """
 
 import subprocess
@@ -46,7 +46,7 @@ if DATA_FOLDER is None:
     except Exception:
         pass
 
-from behavior_data_extractor import load_auto_context, plot_auto_scope, show_extraction_widget
+from behavior_data_extractor import display_all_scope_results, load_auto_context, show_extraction_widget
 
 if DATA_FOLDER is None:
     DATA_FOLDER = str(REPO_DIR / "Jeremy")
@@ -57,9 +57,9 @@ else:
 show_extraction_widget(DATA_FOLDER)
 if AUTO_PRELOAD_AND_PLOT:
     context = load_auto_context(DATA_FOLDER, selected_day=None, default_scope="auto")
-    rendered = plot_auto_scope(context, scope="auto")
-    print(f"Preloaded and rendered scope: {rendered}")
+    display_all_scope_results(context)
+    print("Preloaded and rendered: day/week/all")
 else:
     print("Optional preload:")
     print("context = load_auto_context(DATA_FOLDER, selected_day=None, default_scope='auto')")
-    print("plot_auto_scope(context, scope='auto')")
+    print("display_all_scope_results(context)")
