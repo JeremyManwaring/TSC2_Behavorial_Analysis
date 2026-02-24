@@ -62,6 +62,32 @@ class AnalysisData:
 LAST_ANALYSIS_DATA: Optional[AnalysisData] = None
 
 
+@dataclass
+class AutoExtractionContext:
+    root_folder: Path
+    selected_day: str
+    day: AnalysisData
+    week: AnalysisData
+    all_time: AnalysisData
+    resolved_scope: str
+
+    def summary_text(self) -> str:
+        return "\n".join(
+            [
+                f"Root folder: {self.root_folder}",
+                f"Selected day: {self.selected_day}",
+                f"Resolved default scope: {self.resolved_scope}",
+                f"Day rows: trials={len(self.day.trials)}, lick_df={len(self.day.lick_df)}",
+                f"Week rows: trials={len(self.week.trials)}, lick_df={len(self.week.lick_df)}",
+                f"All rows: trials={len(self.all_time.trials)}, lick_df={len(self.all_time.lick_df)}",
+                "Week folders: " + ", ".join(folder.name for folder in self.week.extraction.selected_folders),
+            ]
+        )
+
+
+LAST_AUTO_CONTEXT: Optional[AutoExtractionContext] = None
+
+
 def parse_day_folder(folder_name: str) -> Optional[date]:
     if not DATE_FOLDER_PATTERN.match(folder_name):
         return None
@@ -97,7 +123,7 @@ def _normalize_root_and_day(
     parsed_root_day = parse_day_folder(root.name)
 
     if parsed_root_day is not None and root.parent.exists():
-        if mode == "day" and day_folder is None:
+        if mode in ("day", "week") and day_folder is None:
             day_folder = root.name
         root = root.parent
 
@@ -105,7 +131,10 @@ def _normalize_root_and_day(
 
 
 def _select_folders(
-    dated_folders: List[Tuple[Path, date]], mode: str, day_folder: Optional[str]
+    dated_folders: List[Tuple[Path, date]],
+    mode: str,
+    day_folder: Optional[str],
+    anchor_day: Optional[str] = None,
 ) -> List[Tuple[Path, date]]:
     if not dated_folders:
         raise ValueError("No day folders found. Expected folder names like YYMMDD.")
@@ -119,9 +148,14 @@ def _select_folders(
         return [dated_folders[-1]]
 
     if mode == "week":
-        newest_day = dated_folders[-1][1]
-        start_day = newest_day - timedelta(days=6)
-        return [item for item in dated_folders if start_day <= item[1] <= newest_day]
+        anchor_date = dated_folders[-1][1]
+        if anchor_day:
+            selected_anchor = [item for item in dated_folders if item[0].name == anchor_day]
+            if not selected_anchor:
+                raise ValueError(f"Anchor day folder not found: {anchor_day}")
+            anchor_date = selected_anchor[0][1]
+        start_day = anchor_date - timedelta(days=6)
+        return [item for item in dated_folders if start_day <= item[1] <= anchor_date]
 
     if mode == "all":
         return dated_folders
@@ -176,12 +210,28 @@ def _collect_files(selected_folders: List[Tuple[Path, date]]) -> Dict[str, List[
 
 
 def extract_behavior_data(
-    root_folder: Union[str, Path], mode: str = "day", day_folder: Optional[str] = None
+    root_folder: Union[str, Path],
+    mode: str = "day",
+    day_folder: Optional[str] = None,
+    anchor_day: Optional[str] = None,
 ) -> ExtractionResult:
     normalized_mode = mode.strip().lower()
-    normalized_root, normalized_day = _normalize_root_and_day(root_folder, normalized_mode, day_folder)
+    requested_anchor = anchor_day if anchor_day is not None else day_folder
+    normalized_root, normalized_anchor = _normalize_root_and_day(root_folder, normalized_mode, requested_anchor)
     dated_folders = list_day_folders(normalized_root)
-    selected = _select_folders(dated_folders, normalized_mode, normalized_day)
+    if normalized_mode == "week":
+        selected = _select_folders(
+            dated_folders,
+            normalized_mode,
+            day_folder=None,
+            anchor_day=normalized_anchor,
+        )
+    else:
+        selected = _select_folders(
+            dated_folders,
+            normalized_mode,
+            day_folder=normalized_anchor,
+        )
     files_by_type = _collect_files(selected)
     sessions = _session_id_map(selected)
 
@@ -396,9 +446,17 @@ def build_analysis_data(extraction: ExtractionResult) -> AnalysisData:
 
 
 def load_analysis_data(
-    root_folder: Union[str, Path], mode: str = "all", day_folder: Optional[str] = None
+    root_folder: Union[str, Path],
+    mode: str = "all",
+    day_folder: Optional[str] = None,
+    anchor_day: Optional[str] = None,
 ) -> AnalysisData:
-    extraction = extract_behavior_data(root_folder=root_folder, mode=mode, day_folder=day_folder)
+    extraction = extract_behavior_data(
+        root_folder=root_folder,
+        mode=mode,
+        day_folder=day_folder,
+        anchor_day=anchor_day,
+    )
     return build_analysis_data(extraction)
 
 
@@ -406,10 +464,16 @@ def load_into_namespace(
     root_folder: Union[str, Path],
     mode: str = "all",
     day_folder: Optional[str] = None,
+    anchor_day: Optional[str] = None,
     namespace: Optional[MutableMapping[str, object]] = None,
 ) -> AnalysisData:
     target_namespace = namespace if namespace is not None else __main__.__dict__
-    analysis = load_analysis_data(root_folder=root_folder, mode=mode, day_folder=day_folder)
+    analysis = load_analysis_data(
+        root_folder=root_folder,
+        mode=mode,
+        day_folder=day_folder,
+        anchor_day=anchor_day,
+    )
     target_namespace["trials"] = analysis.trials
     target_namespace["lick_df"] = analysis.lick_df
     target_namespace["stimulus_data"] = analysis.stimulus_data
@@ -419,9 +483,102 @@ def load_into_namespace(
     return analysis
 
 
+def _resolve_selected_day(root_folder: Union[str, Path], selected_day: Optional[str]) -> str:
+    dated_folders = list_day_folders(root_folder)
+    if not dated_folders:
+        raise ValueError("No day folders found. Expected folder names like YYMMDD.")
+    folder_names = {folder.name for folder, _ in dated_folders}
+    if selected_day:
+        if selected_day not in folder_names:
+            raise ValueError(f"Selected day folder not found: {selected_day}")
+        return selected_day
+    return dated_folders[-1][0].name
+
+
+def apply_scope_aliases(
+    context: AutoExtractionContext,
+    scope: str = "auto",
+    namespace: Optional[MutableMapping[str, object]] = None,
+) -> str:
+    target_namespace = namespace if namespace is not None else __main__.__dict__
+    normalized_scope = scope.strip().lower()
+    if normalized_scope == "auto":
+        normalized_scope = "week"
+    if normalized_scope not in {"day", "week", "all"}:
+        raise ValueError("Scope must be one of: auto, day, week, all.")
+
+    by_scope = {
+        "day": context.day,
+        "week": context.week,
+        "all": context.all_time,
+    }
+    selected = by_scope[normalized_scope]
+
+    target_namespace["analysis_scope"] = normalized_scope
+    target_namespace["trials"] = selected.trials
+    target_namespace["lick_df"] = selected.lick_df
+    target_namespace["stimulus_data"] = selected.stimulus_data
+    target_namespace["header_data"] = selected.header_data
+    target_namespace["extraction_result"] = selected.extraction
+    target_namespace["analysis_data"] = selected
+    return normalized_scope
+
+
+def load_auto_context(
+    root_folder: Union[str, Path],
+    selected_day: Optional[str] = None,
+    default_scope: str = "auto",
+    namespace: Optional[MutableMapping[str, object]] = None,
+) -> AutoExtractionContext:
+    target_namespace = namespace if namespace is not None else __main__.__dict__
+    resolved_day = _resolve_selected_day(root_folder, selected_day)
+
+    day_data = load_analysis_data(root_folder=root_folder, mode="day", day_folder=resolved_day)
+    week_data = load_analysis_data(root_folder=root_folder, mode="week", anchor_day=resolved_day)
+    all_data = load_analysis_data(root_folder=root_folder, mode="all")
+
+    context = AutoExtractionContext(
+        root_folder=Path(root_folder).expanduser().resolve(),
+        selected_day=resolved_day,
+        day=day_data,
+        week=week_data,
+        all_time=all_data,
+        resolved_scope="week",
+    )
+
+    target_namespace["analysis_context"] = context
+
+    target_namespace["analysis_day"] = day_data
+    target_namespace["trials_day"] = day_data.trials
+    target_namespace["lick_df_day"] = day_data.lick_df
+    target_namespace["stimulus_data_day"] = day_data.stimulus_data
+    target_namespace["header_data_day"] = day_data.header_data
+
+    target_namespace["analysis_week"] = week_data
+    target_namespace["trials_week"] = week_data.trials
+    target_namespace["lick_df_week"] = week_data.lick_df
+    target_namespace["stimulus_data_week"] = week_data.stimulus_data
+    target_namespace["header_data_week"] = week_data.header_data
+
+    target_namespace["analysis_all"] = all_data
+    target_namespace["trials_all"] = all_data.trials
+    target_namespace["lick_df_all"] = all_data.lick_df
+    target_namespace["stimulus_data_all"] = all_data.stimulus_data
+    target_namespace["header_data_all"] = all_data.header_data
+
+    resolved_scope = apply_scope_aliases(context, scope=default_scope, namespace=target_namespace)
+    context.resolved_scope = resolved_scope
+
+    global LAST_AUTO_CONTEXT
+    LAST_AUTO_CONTEXT = context
+    return context
+
+
 def show_extraction_widget(default_folder: Union[str, Path] = "Jeremy"):
     import ipywidgets as widgets
     from IPython.display import display
+
+    most_recent_token = "__MOST_RECENT__"
 
     folder_input = widgets.Text(
         value=str(Path(default_folder).expanduser()),
@@ -429,22 +586,24 @@ def show_extraction_widget(default_folder: Union[str, Path] = "Jeremy"):
         placeholder="/path/to/Jeremy",
         layout=widgets.Layout(width="100%"),
     )
-    mode_input = widgets.ToggleButtons(
+    default_scope_input = widgets.ToggleButtons(
         options=[
-            ("Single Day", "day"),
-            ("One Week (Most Recent 7 Days)", "week"),
-            ("All Time", "all"),
+            ("Auto", "auto"),
+            ("Day", "day"),
+            ("Week", "week"),
+            ("All", "all"),
         ],
-        description="Mode:",
+        description="Default:",
     )
     day_input = widgets.Dropdown(
-        options=[],
-        description="Day:",
+        options=[("Most Recent", most_recent_token)],
+        description="Anchor Day:",
         disabled=False,
         layout=widgets.Layout(width="100%"),
     )
     scan_button = widgets.Button(description="Scan Folders", button_style="info")
-    extract_button = widgets.Button(description="Extract Data", button_style="success")
+    extract_button = widgets.Button(description="Load Folder", button_style="success")
+    apply_scope_button = widgets.Button(description="Apply Default Scope")
     close_button = widgets.Button(description="Close")
     status = widgets.HTML()
     output = widgets.Output(layout=widgets.Layout(max_height="260px", overflow_y="auto"))
@@ -466,9 +625,9 @@ def show_extraction_widget(default_folder: Union[str, Path] = "Jeremy"):
         [
             widgets.HTML("<b>Behavior Data Extractor</b>"),
             folder_input,
-            mode_input,
+            default_scope_input,
             day_input,
-            widgets.HBox([scan_button, extract_button, close_button]),
+            widgets.HBox([scan_button, extract_button, apply_scope_button, close_button]),
             status,
             output,
         ],
@@ -488,63 +647,75 @@ def show_extraction_widget(default_folder: Union[str, Path] = "Jeremy"):
     def refresh_day_options() -> None:
         try:
             folders = list_day_folders(folder_input.value)
-            options = [folder.name for folder, _ in folders]
-            day_input.options = options
-            if options:
-                day_input.value = options[-1]
-                status.value = (
-                    f"<span style='color:#2f6f37'>Found {len(options)} folders. "
-                    f"Most recent: <b>{options[-1]}</b>.</span>"
-                )
-            else:
+            if not folders:
+                day_input.options = [("Most Recent", most_recent_token)]
                 status.value = "<span style='color:#a33'>No YYMMDD folders found.</span>"
+                return
+            options = [(f"Most Recent ({folders[-1][0].name})", most_recent_token)]
+            options.extend((folder.name, folder.name) for folder, _ in folders)
+            day_input.options = options
+            day_input.value = most_recent_token
+            status.value = (
+                f"<span style='color:#2f6f37'>Found {len(folders)} folders. "
+                f"Most recent: <b>{folders[-1][0].name}</b>.</span>"
+            )
         except Exception as exc:
-            day_input.options = []
+            day_input.options = [("Most Recent", most_recent_token)]
             status.value = f"<span style='color:#a33'>{exc}</span>"
 
-    def update_day_enabled(*_args) -> None:
-        day_input.disabled = mode_input.value != "day"
+    def selected_day_value() -> Optional[str]:
+        return None if day_input.value == most_recent_token else str(day_input.value)
 
     def handle_launch(_):
         panel.layout.display = "none" if panel.layout.display == "flex" else "flex"
         if panel.layout.display == "flex":
             refresh_day_options()
-            update_day_enabled()
 
     def handle_close(_):
         panel.layout.display = "none"
 
     def handle_scan(_):
         refresh_day_options()
-        update_day_enabled()
 
     def handle_extract(_):
         with output:
             output.clear_output()
             try:
-                selected_day = day_input.value if mode_input.value == "day" else None
-                analysis = load_into_namespace(
+                context = load_auto_context(
                     root_folder=folder_input.value,
-                    mode=mode_input.value,
-                    day_folder=selected_day,
+                    selected_day=selected_day_value(),
+                    default_scope=default_scope_input.value,
                 )
-                print(analysis.summary_text())
+                print(context.summary_text())
                 print()
                 print("Notebook variables updated:")
-                print("  trials")
-                print("  lick_df")
-                print("  stimulus_data")
-                print("  header_data")
-                print("  extraction_result")
-                print("  analysis_data")
+                print("  analysis_context")
+                print("  trials_day, lick_df_day, stimulus_data_day, header_data_day")
+                print("  trials_week, lick_df_week, stimulus_data_week, header_data_week")
+                print("  trials_all, lick_df_all, stimulus_data_all, header_data_all")
+                print("Default aliases:")
+                print("  trials, lick_df, stimulus_data, header_data")
+                print(f"Active alias scope: {context.resolved_scope}")
             except Exception as exc:
                 print(f"Extraction failed: {exc}")
+
+    def handle_apply_scope(_):
+        with output:
+            try:
+                if LAST_AUTO_CONTEXT is None:
+                    print("No loaded context yet. Click 'Load Folder' first.")
+                    return
+                resolved = apply_scope_aliases(LAST_AUTO_CONTEXT, scope=default_scope_input.value)
+                LAST_AUTO_CONTEXT.resolved_scope = resolved
+                print(f"Applied default aliases to scope: {resolved}")
+            except Exception as exc:
+                print(f"Scope update failed: {exc}")
 
     launch_button.on_click(handle_launch)
     close_button.on_click(handle_close)
     scan_button.on_click(handle_scan)
     extract_button.on_click(handle_extract)
-    mode_input.observe(update_day_enabled, names="value")
+    apply_scope_button.on_click(handle_apply_scope)
 
     display(launch_button)
     display(panel)
@@ -567,7 +738,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--day",
         default=None,
-        help="Specific day folder (YYMMDD). Used only with --mode day.",
+        help="Specific day folder (YYMMDD). Used with --mode day, or as fallback anchor for --mode week.",
+    )
+    parser.add_argument(
+        "--anchor-day",
+        default=None,
+        help="Anchor day folder (YYMMDD) for --mode week. Defaults to most recent day.",
     )
     return parser
 
@@ -575,7 +751,14 @@ def _build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
-    result = extract_behavior_data(args.folder, mode=args.mode, day_folder=args.day)
+    day_folder = args.day if args.mode == "day" else None
+    anchor_day = args.anchor_day if args.anchor_day is not None else (args.day if args.mode == "week" else None)
+    result = extract_behavior_data(
+        args.folder,
+        mode=args.mode,
+        day_folder=day_folder,
+        anchor_day=anchor_day,
+    )
     print(result.summary_text())
     return 0
 
