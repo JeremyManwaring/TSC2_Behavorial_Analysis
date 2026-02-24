@@ -1,35 +1,31 @@
-TSC2 Behavioral Analysis
-Unified Behavioral Data Extraction Pipeline
+# TSC2 Behavioral Analysis
+## Unified Behavioral Data Extraction Pipeline
 
 This repository provides a consolidated extraction workflow for multi-session mouse behavioral datasets.
 
 The core extraction logic lives in:
+`behavior_data_extractor.py`
 
-behavior_data_extractor.py
+For **Google Colab** users, a one-cell setup script is provided to automatically:
+* Clone the latest version of the repository
+* Mount Google Drive
+* Load behavioral data
+* Display scope results
+* Launch the extraction widget
 
-For Google Colab users, a one-cell setup script is provided to automatically:
+---
 
-Clone the latest version of the repository
-
-Mount Google Drive
-
-Load behavioral data
-
-Display scope results
-
-Launch the extraction widget
-
-🚀 Google Colab Quick Start
-
+### 🚀 Google Colab Quick Start
 Copy and paste the following into a single Colab cell:
 
+```python
 import os
 import shutil
 import subprocess
 import sys
 from google.colab import drive
 
-REPO_URL = "https://github.com/JeremyManwaring/TSC2_Behavorial_Analysis.git"
+REPO_URL = "[https://github.com/JeremyManwaring/TSC2_Behavorial_Analysis.git](https://github.com/JeremyManwaring/TSC2_Behavorial_Analysis.git)"
 REPO_DIR = "/content/TSC2_Behavorial_Analysis"
 
 # Ensure fresh clone of latest main branch
@@ -69,19 +65,3 @@ bde.display_all_scope_results(context)
 
 # Launch interactive extraction widget
 bde.show_extraction_widget(DATA_FOLDER)
-📁 Expected Google Drive Structure
-
-Your behavioral data should be organized as:
-
-My Drive/
-└── Jeremy/
-    ├── 260120/
-    ├── 260121/
-    ├── 260122/
-    └── ...
-
-DATA_FOLDER must point to the directory containing all session folders:
-
-/content/drive/MyDrive/Jeremy/
-
-If your data is nested deeper, update the path accordingly.
