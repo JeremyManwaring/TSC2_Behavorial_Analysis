@@ -822,7 +822,7 @@ def _trial_licks_by_key(analysis: AnalysisData) -> Dict[Tuple[str, int], List[fl
     return by_key
 
 
-def plot_lick_raster(analysis: AnalysisData, ax=None, max_trials: int = 200) -> None:
+def plot_lick_raster(analysis: AnalysisData, ax=None, max_trials: int = 200) -> int:
     import matplotlib.pyplot as plt
 
     trials = _ordered_trials(analysis.trials)
@@ -833,7 +833,7 @@ def plot_lick_raster(analysis: AnalysisData, ax=None, max_trials: int = 200) -> 
             ax.set_axis_off()
         else:
             print("No lick raster data.")
-        return
+        return 0
 
     trials = trials.head(max_trials).copy()
     lick_map = _trial_licks_by_key(analysis)
@@ -844,6 +844,9 @@ def plot_lick_raster(analysis: AnalysisData, ax=None, max_trials: int = 200) -> 
         fig, ax = plt.subplots(figsize=(11, 6))
 
     max_time = 0.0
+    total_points = 0
+    all_points: List[float] = []
+    max_trial_duration = 0.0
     for plot_idx, (_, tr_row) in enumerate(trials.iterrows()):
         session_id = str(tr_row["session_id"])
         tr_num_num = pd.to_numeric(tr_row["TrNum"], errors="coerce")
@@ -857,27 +860,53 @@ def plot_lick_raster(analysis: AnalysisData, ax=None, max_trials: int = 200) -> 
 
         trial_dur_sec = max((tr_end - tr_start) / 1000.0, 0.0)
         ax.hlines(y=plot_idx, xmin=0, xmax=trial_dur_sec, color="gray", alpha=0.15, linewidth=6)
+        max_trial_duration = max(max_trial_duration, trial_dur_sec)
         max_time = max(max_time, trial_dur_sec)
 
         licks_rel_stim = lick_map.get((session_id, tr_num), [])
         if licks_rel_stim:
             aligned_licks = [(lick + stim_rel_trial) / 1000.0 for lick in licks_rel_stim]
-            aligned_licks = [lick for lick in aligned_licks if lick >= -0.5]
             if aligned_licks:
-                ax.vlines(aligned_licks, ymin=plot_idx - 0.4, ymax=plot_idx + 0.4, color="black", alpha=0.8)
+                ax.scatter(
+                    aligned_licks,
+                    [plot_idx] * len(aligned_licks),
+                    s=8,
+                    c="black",
+                    alpha=0.8,
+                    linewidths=0,
+                )
+                total_points += len(aligned_licks)
+                all_points.extend(aligned_licks)
                 max_time = max(max_time, max(aligned_licks))
 
     ax.set_xlabel("Time from Trial Start (s)")
     ax.set_ylabel("Trial Number")
     title_suffix = f" (first {len(trials)} trials)" if len(trials) < len(analysis.trials) else ""
     ax.set_title(f"Lick Raster Plot{title_suffix}")
-    ax.set_xlim([-0.5, max_time + 0.5])
+    if all_points:
+        points_series = pd.Series(all_points, dtype=float).replace([float("inf"), float("-inf")], pd.NA).dropna()
+        if not points_series.empty:
+            q_low = float(points_series.quantile(0.01))
+            q_high = float(points_series.quantile(0.99))
+            # Keep raw data intact, but avoid extreme outliers flattening the display.
+            view_min = max(-2.0, q_low - 0.2)
+            view_max = max(max_trial_duration + 0.5, q_high + 0.2)
+        else:
+            view_min = -0.5
+            view_max = max_trial_duration + 0.5
+    else:
+        view_min = -0.5
+        view_max = max_trial_duration + 0.5
+    if view_max <= view_min:
+        view_max = view_min + 1.0
+    ax.set_xlim([view_min, view_max])
     ax.invert_yaxis()
     ax.grid(alpha=0.2, axis="x")
 
     if own_fig:
         plt.tight_layout()
         plt.show()
+    return total_points
 
 
 def plot_dprime_and_rates(analysis: AnalysisData, window_size: int = 10) -> None:
@@ -1000,15 +1029,25 @@ def _plot_outcome_panel(trials: pd.DataFrame, mode: str, ax) -> None:
         return
 
     if mode == "week" and "date" in filtered_trials.columns:
+        date_series = pd.to_datetime(filtered_trials["date"], errors="coerce").dt.normalize()
+        filtered_trials = filtered_trials.assign(_plot_date=date_series).dropna(subset=["_plot_date"])
+        if filtered_trials.empty:
+            ax.text(0.5, 0.5, "No dated outcome data", ha="center", va="center", transform=ax.transAxes)
+            ax.set_axis_off()
+            return
+
         by_date = (
-            filtered_trials.groupby(["date", "outcome_label"])
+            filtered_trials.groupby(["_plot_date", "outcome_label"])
             .size()
             .unstack(fill_value=0)
             .reindex(columns=valid_outcomes, fill_value=0)
             .sort_index()
         )
 
-        x_labels = by_date.index.astype(str)
+        anchor_date = by_date.index.max()
+        full_index = pd.date_range(anchor_date - pd.Timedelta(days=6), anchor_date, freq="D")
+        by_date = by_date.reindex(full_index, fill_value=0)
+        x_labels = [dt.strftime("%Y-%m-%d") for dt in by_date.index]
         for outcome in valid_outcomes:
             ax.plot(
                 x_labels,

@@ -67,6 +67,8 @@ Inside the popup you can:
 - overview now uses a lick raster panel (replacing `Trials per Day`)
 - week outcome panel is a 7-day time-series line graph (Hit/Miss/False Alarm/Correct Reject only)
 - rolling-rate axes auto-scale to avoid clipping
+- week outcome x-axis always shows all 7 calendar days (zero-count days included)
+- unknown outcomes are excluded from the outcome trend plot only (raw trial data stays unchanged)
 
 After loading, all scope-specific data is available:
 
