@@ -8,6 +8,7 @@ What it does:
 
 Optional:
 - Set DATA_FOLDER to your own Jeremy data folder in Drive.
+- Set AUTO_PRELOAD_AND_PLOT to True to render graphs immediately.
 """
 
 import subprocess
@@ -21,6 +22,7 @@ REPO_DIR = Path("/content/TSC2_Behavorial_Analysis")
 # Set this to your Drive path if you want your own data, for example:
 # DATA_FOLDER = "/content/drive/MyDrive/TSC2/Jeremy"
 DATA_FOLDER = None
+AUTO_PRELOAD_AND_PLOT = True
 
 
 def run(cmd: list[str]) -> None:
@@ -44,7 +46,7 @@ if DATA_FOLDER is None:
     except Exception:
         pass
 
-from behavior_data_extractor import load_auto_context, show_extraction_widget
+from behavior_data_extractor import load_auto_context, plot_auto_scope, show_extraction_widget
 
 if DATA_FOLDER is None:
     DATA_FOLDER = str(REPO_DIR / "Jeremy")
@@ -53,5 +55,11 @@ else:
     print(f"Using DATA_FOLDER: {DATA_FOLDER}")
 
 show_extraction_widget(DATA_FOLDER)
-print("Optional preload:")
-print("context = load_auto_context(DATA_FOLDER, selected_day=None, default_scope='auto')")
+if AUTO_PRELOAD_AND_PLOT:
+    context = load_auto_context(DATA_FOLDER, selected_day=None, default_scope="auto")
+    rendered = plot_auto_scope(context, scope="auto")
+    print(f"Preloaded and rendered scope: {rendered}")
+else:
+    print("Optional preload:")
+    print("context = load_auto_context(DATA_FOLDER, selected_day=None, default_scope='auto')")
+    print("plot_auto_scope(context, scope='auto')")

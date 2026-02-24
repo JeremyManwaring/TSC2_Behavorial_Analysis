@@ -574,6 +574,117 @@ def load_auto_context(
     return context
 
 
+def _ordered_trials(trials: pd.DataFrame) -> pd.DataFrame:
+    if trials.empty:
+        return trials
+    order_cols = [col for col in ["date", "session", "TrNum"] if col in trials.columns]
+    if not order_cols:
+        return trials.reset_index(drop=True)
+    return trials.sort_values(order_cols).reset_index(drop=True)
+
+
+def _first_nonnegative(values: object) -> float:
+    if not isinstance(values, list):
+        return float("nan")
+    for value in values:
+        try:
+            numeric = float(value)
+        except Exception:
+            continue
+        if numeric >= 0:
+            return numeric
+    return float("nan")
+
+
+def plot_scope_overview(analysis: AnalysisData, rolling_window: int = 20) -> None:
+    import matplotlib.pyplot as plt
+
+    trials = _ordered_trials(analysis.trials)
+    if trials.empty:
+        print("No trial data available for plotting.")
+        return
+
+    if "TrType" in trials.columns and "TrOutcome" in trials.columns:
+        tr_type = pd.to_numeric(trials["TrType"], errors="coerce").fillna(-1).astype(int)
+        outcome = pd.to_numeric(trials["TrOutcome"], errors="coerce").fillna(-1).astype(int)
+        go_trials = tr_type == 1
+        nogo_trials = tr_type == 0
+        hit_events = (tr_type == 1) & (outcome == 1)
+        fa_events = (tr_type == 0) & (outcome == 3)
+        hit_denominator = go_trials.rolling(rolling_window, min_periods=1).sum().replace(0, float("nan"))
+        fa_denominator = nogo_trials.rolling(rolling_window, min_periods=1).sum().replace(0, float("nan"))
+        hit_rate = (hit_events.rolling(rolling_window, min_periods=1).sum() / hit_denominator).astype(float)
+        fa_rate = (fa_events.rolling(rolling_window, min_periods=1).sum() / fa_denominator).astype(float)
+    else:
+        hit_rate = pd.Series(index=trials.index, dtype=float)
+        fa_rate = pd.Series(index=trials.index, dtype=float)
+
+    outcome_counts = pd.Series(dtype=int)
+    if "outcome_label" in trials.columns:
+        outcome_counts = trials["outcome_label"].fillna("Unknown").value_counts()
+
+    first_lick_sec = pd.Series(dtype=float)
+    if not analysis.lick_df.empty and "lick_times_rel_stim_ms" in analysis.lick_df.columns:
+        first_lick_ms = analysis.lick_df["lick_times_rel_stim_ms"].apply(_first_nonnegative)
+        first_lick_sec = (first_lick_ms / 1000.0).dropna()
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+
+    axes[0, 0].plot(range(1, len(trials) + 1), hit_rate, label="Hit Rate", color="#1f77b4")
+    axes[0, 0].plot(range(1, len(trials) + 1), fa_rate, label="FA Rate", color="#ea6161")
+    axes[0, 0].set_title(f"Rolling Rates (window={rolling_window})")
+    axes[0, 0].set_xlabel("Trial")
+    axes[0, 0].set_ylabel("Rate")
+    axes[0, 0].set_ylim(0, 1)
+    axes[0, 0].legend(loc="best")
+    axes[0, 0].grid(alpha=0.3)
+
+    if not outcome_counts.empty:
+        outcome_order = ["Hit", "Miss", "False Alarm", "Correct Reject", "Unknown"]
+        filtered = outcome_counts.reindex([label for label in outcome_order if label in outcome_counts.index]).fillna(0)
+        axes[0, 1].bar(filtered.index, filtered.values, color=["#2a9d8f", "#9aa0a6", "#e76f51", "#264653", "#999999"][: len(filtered)])
+    axes[0, 1].set_title("Outcome Counts")
+    axes[0, 1].tick_params(axis="x", rotation=20)
+
+    if "date" in trials.columns:
+        daily_counts = trials.groupby("date").size()
+        axes[1, 0].plot(daily_counts.index.astype(str), daily_counts.values, marker="o", color="#5e5656")
+    axes[1, 0].set_title("Trials per Day")
+    axes[1, 0].set_xlabel("Date")
+    axes[1, 0].set_ylabel("Trials")
+    axes[1, 0].tick_params(axis="x", rotation=45)
+    axes[1, 0].grid(alpha=0.3)
+
+    if not first_lick_sec.empty:
+        axes[1, 1].hist(first_lick_sec, bins=30, color="#457b9d", alpha=0.85)
+    axes[1, 1].set_title("First Lick Latency (>= 0s)")
+    axes[1, 1].set_xlabel("Seconds from stimulus")
+    axes[1, 1].set_ylabel("Count")
+
+    fig.suptitle(
+        f"{analysis.extraction.mode.upper()} scope overview | "
+        f"folders={len(analysis.extraction.selected_folders)} | trials={len(analysis.trials)}",
+        fontsize=12,
+    )
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_auto_scope(context: AutoExtractionContext, scope: str = "auto", rolling_window: int = 20) -> str:
+    normalized_scope = scope.strip().lower()
+    if normalized_scope == "auto":
+        normalized_scope = context.resolved_scope if context.resolved_scope in {"day", "week", "all"} else "week"
+    if normalized_scope not in {"day", "week", "all"}:
+        raise ValueError("Scope must be one of: auto, day, week, all.")
+    by_scope = {
+        "day": context.day,
+        "week": context.week,
+        "all": context.all_time,
+    }
+    plot_scope_overview(by_scope[normalized_scope], rolling_window=rolling_window)
+    return normalized_scope
+
+
 def show_extraction_widget(default_folder: Union[str, Path] = "Jeremy"):
     import ipywidgets as widgets
     from IPython.display import display
@@ -602,9 +713,10 @@ def show_extraction_widget(default_folder: Union[str, Path] = "Jeremy"):
         layout=widgets.Layout(width="100%"),
     )
     scan_button = widgets.Button(description="Scan Folders", button_style="info")
-    extract_button = widgets.Button(description="Load Folder", button_style="success")
+    extract_button = widgets.Button(description="Load + Plot", button_style="success")
     apply_scope_button = widgets.Button(description="Apply Default Scope")
     close_button = widgets.Button(description="Close")
+    auto_plot_input = widgets.Checkbox(value=True, description="Auto-plot on load")
     status = widgets.HTML()
     output = widgets.Output(layout=widgets.Layout(max_height="260px", overflow_y="auto"))
 
@@ -627,6 +739,7 @@ def show_extraction_widget(default_folder: Union[str, Path] = "Jeremy"):
             folder_input,
             default_scope_input,
             day_input,
+            auto_plot_input,
             widgets.HBox([scan_button, extract_button, apply_scope_button, close_button]),
             status,
             output,
@@ -696,6 +809,11 @@ def show_extraction_widget(default_folder: Union[str, Path] = "Jeremy"):
                 print("Default aliases:")
                 print("  trials, lick_df, stimulus_data, header_data")
                 print(f"Active alias scope: {context.resolved_scope}")
+                if auto_plot_input.value:
+                    print()
+                    print("Rendering overview plots...")
+                    rendered_scope = plot_auto_scope(context, scope=default_scope_input.value)
+                    print(f"Rendered scope: {rendered_scope}")
             except Exception as exc:
                 print(f"Extraction failed: {exc}")
 
@@ -762,6 +880,12 @@ def main() -> int:
         anchor_day=anchor_day,
     )
     print(result.summary_text())
+    try:
+        analysis = build_analysis_data(result)
+        plot_scope_overview(analysis)
+    except Exception:
+        # Keep CLI resilient even if plotting backend is unavailable.
+        pass
     return 0
 
 

@@ -26,10 +26,11 @@ Inside the popup you can:
 
 - input the folder path
 - optionally choose an anchor day (or keep `Most Recent`)
-- click `Load Folder` once and automatically prepare all scopes:
+- click `Load + Plot` once and automatically prepare all scopes:
 - `day` (anchor day)
 - `week` (anchor day and previous 6 days)
 - `all` (all folders)
+- auto-render overview graphs for the default scope
 
 After loading, all scope-specific data is available:
 
@@ -48,10 +49,11 @@ Use `Default: Auto/Day/Week/All` in the popup to control which scope feeds those
 Auto-load everything and set aliases in one call:
 
 ```python
-from behavior_data_extractor import load_auto_context
+from behavior_data_extractor import load_auto_context, plot_auto_scope
 
 context = load_auto_context("Jeremy", selected_day=None, default_scope="auto")
 # selected_day=None uses most recent folder
+plot_auto_scope(context, scope="auto")
 ```
 
 Manually switch alias scope later:
