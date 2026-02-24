@@ -4,6 +4,14 @@
 
 Use `behavior_data_extractor.py` for one consolidated extraction flow.
 
+### Colab Quick Paste
+
+For Colab, copy/paste the full contents of:
+
+- `colab_snippet.py`
+
+This gives you one-cell setup (clone/pull repo + open extractor widget).
+
 ### Notebook UI (bottom popup button)
 
 ```python
