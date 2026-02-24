@@ -10,7 +10,7 @@ For Colab, copy/paste the full contents of:
 
 - `colab_snippet.py`
 
-This gives you one-cell setup (clone/pull repo + open extractor widget).
+This gives you one-cell setup (force-sync repo to latest `main` + open extractor widget).
 
 ### Notebook UI (bottom popup button)
 

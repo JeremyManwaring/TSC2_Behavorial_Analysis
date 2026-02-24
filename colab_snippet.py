@@ -31,9 +31,11 @@ def run(cmd: list[str]) -> None:
 
 
 if REPO_DIR.exists():
-    run(["git", "-C", str(REPO_DIR), "pull", "--ff-only"])
+    # Force-sync to origin/main to avoid stale Colab copies.
+    run(["git", "-C", str(REPO_DIR), "fetch", "origin", "main"])
+    run(["git", "-C", str(REPO_DIR), "checkout", "-B", "main", "origin/main"])
 else:
-    run(["git", "clone", REPO_URL, str(REPO_DIR)])
+    run(["git", "clone", "--branch", "main", "--single-branch", REPO_URL, str(REPO_DIR)])
 
 if str(REPO_DIR) not in sys.path:
     sys.path.insert(0, str(REPO_DIR))
@@ -45,6 +47,10 @@ if DATA_FOLDER is None:
         drive.mount("/content/drive", force_remount=False)
     except Exception:
         pass
+
+# Avoid stale module objects if this cell is re-run in the same runtime.
+if "behavior_data_extractor" in sys.modules:
+    del sys.modules["behavior_data_extractor"]
 
 from behavior_data_extractor import display_all_scope_results, load_auto_context, show_extraction_widget
 
