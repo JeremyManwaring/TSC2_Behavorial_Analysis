@@ -648,6 +648,88 @@ def _resolve_selected_day(root_folder: Union[str, Path], selected_day: Optional[
     return dated_folders[-1][0].name
 
 
+def prepare_manual_selection(
+    root_folder: Union[str, Path],
+    day_folder: Optional[str],
+    week_folders: List[str],
+) -> Dict[str, object]:
+    normalized_root = Path(root_folder).expanduser().resolve()
+    dated_folders = list_day_folders(normalized_root)
+    if not dated_folders:
+        raise ValueError("No YYMMDD folders found in root folder.")
+
+    available_names = [folder.name for folder, _ in dated_folders]
+    available_set = set(available_names)
+
+    selected_day = str(day_folder).strip() if day_folder is not None else ""
+    if not selected_day:
+        raise ValueError("day_folder is required and cannot be empty.")
+    if selected_day not in available_set:
+        raise ValueError(f"Selected day folder not found: {selected_day}")
+
+    dedup_week: List[str] = []
+    seen = set()
+    for folder_name in week_folders:
+        normalized_name = str(folder_name).strip()
+        if not normalized_name or normalized_name in seen:
+            continue
+        seen.add(normalized_name)
+        dedup_week.append(normalized_name)
+
+    if not dedup_week:
+        raise ValueError("week_folders must include at least one folder.")
+
+    missing = [name for name in dedup_week if name not in available_set]
+    if missing:
+        raise ValueError(f"Selected week folder(s) not found: {', '.join(missing)}")
+
+    week_by_name = {folder.name: parsed_date for folder, parsed_date in dated_folders}
+    dedup_week.sort(key=lambda name: week_by_name[name])
+
+    return {
+        "root_folder": str(normalized_root),
+        "selected_day": selected_day,
+        "selected_week_days": dedup_week,
+    }
+
+
+def run_manual_selection_plots(
+    root_folder: Union[str, Path],
+    selected_day: str,
+    selected_week_days: List[str],
+    default_scope: str = "week",
+    rolling_window: int = 20,
+) -> Tuple[AutoExtractionContext, pd.DataFrame]:
+    context = load_auto_context(
+        root_folder=root_folder,
+        selected_day=selected_day,
+        selected_week_days=selected_week_days,
+        default_scope=default_scope,
+    )
+
+    print("Loaded folders:")
+    print("  DAY :", ", ".join(folder.name for folder in context.day.extraction.selected_folders))
+    print("  WEEK:", ", ".join(folder.name for folder in context.week.extraction.selected_folders))
+    print(f"  ALL : {len(context.all_time.extraction.selected_folders)} folders")
+
+    def _print_outcome_counts(label: str, trials_df: pd.DataFrame) -> None:
+        if trials_df.empty or "TrOutcome" not in trials_df.columns:
+            print(f"\n{label} TrOutcome counts: no trial/outcome data")
+            return
+        counts = pd.to_numeric(trials_df["TrOutcome"], errors="coerce").value_counts(dropna=False).sort_index()
+        print(f"\n{label} TrOutcome counts:")
+        print(counts.to_string())
+
+    _print_outcome_counts("DAY", context.day.trials)
+    _print_outcome_counts("WEEK", context.week.trials)
+    _print_outcome_counts("ALL", context.all_time.trials)
+
+    print("\nRendering DAY + WEEK + ALL plots...")
+    summary_df = display_all_scope_results(context, rolling_window=rolling_window)
+    print(f"\nDone. Summary rows: {len(summary_df)}")
+    return context, summary_df
+
+
 def apply_scope_aliases(
     context: AutoExtractionContext,
     scope: str = "auto",
