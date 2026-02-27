@@ -699,6 +699,11 @@ def run_manual_selection_plots(
     selected_week_days: List[str],
     default_scope: str = "week",
     rolling_window: int = 20,
+    *,
+    lick_time_window_sec: Tuple[float, float] = (-5.0, 10.0),
+    first_lick_window_sec: Tuple[float, float] = (0.0, 10.0),
+    first_lick_bin_width_sec: float = 0.25,
+    lick_auto_expand_window: bool = False,
 ) -> Tuple[AutoExtractionContext, pd.DataFrame]:
     context = load_auto_context(
         root_folder=root_folder,
@@ -725,7 +730,14 @@ def run_manual_selection_plots(
     _print_outcome_counts("ALL", context.all_time.trials)
 
     print("\nRendering DAY + WEEK + ALL plots...")
-    summary_df = display_all_scope_results(context, rolling_window=rolling_window)
+    summary_df = display_all_scope_results(
+        context,
+        rolling_window=rolling_window,
+        lick_time_window_sec=lick_time_window_sec,
+        first_lick_window_sec=first_lick_window_sec,
+        first_lick_bin_width_sec=first_lick_bin_width_sec,
+        lick_auto_expand_window=lick_auto_expand_window,
+    )
     print(f"\nDone. Summary rows: {len(summary_df)}")
     return context, summary_df
 
@@ -1085,10 +1097,11 @@ def plot_lick_raster(
     ax=None,
     max_trials: int = 200,
     *,
-    time_window_sec: Tuple[float, float] = (-1.0, 4.0),
+    time_window_sec: Tuple[float, float] = (-5.0, 10.0),
     bin_width_sec: float = 0.05,
     include_other_outcomes: bool = True,
     standalone_style: str = "faceted",
+    auto_expand_window: bool = False,
 ) -> int:
     import matplotlib.pyplot as plt
     import numpy as np
@@ -1175,7 +1188,7 @@ def plot_lick_raster(
     all_licks = [float(lick) for rec in records for lick in rec["licks_sec"]]
     total_points = len(all_licks)
     x_min, x_max = float(time_window_sec[0]), float(time_window_sec[1])
-    if all_licks:
+    if auto_expand_window and all_licks:
         lick_series = pd.Series(all_licks, dtype=float).replace([float("inf"), float("-inf")], pd.NA).dropna()
         if not lick_series.empty:
             q01 = float(lick_series.quantile(0.01))
@@ -1186,6 +1199,7 @@ def plot_lick_raster(
                 x_max = q99 + 0.2
     if x_max <= x_min:
         x_max = x_min + 1.0
+    outside_window_count = int(sum(1 for lick in all_licks if lick < x_min or lick > x_max))
 
     def _reward_summary(rows: List[Dict[str, object]]) -> Optional[Tuple[float, float, float]]:
         rewards = [float(r["reward_sec"]) for r in rows if np.isfinite(float(r["reward_sec"]))]
@@ -1224,6 +1238,17 @@ def plot_lick_raster(
         title_suffix = f" (first {len(records)} trials)" if len(records) < len(analysis.trials) else ""
         raster_ax.set_title(f"Stimulus-Aligned Licks{title_suffix}")
         raster_ax.grid(alpha=0.2, axis="x")
+        if outside_window_count > 0:
+            raster_ax.text(
+                0.99,
+                0.01,
+                f"outside window: {outside_window_count}",
+                transform=raster_ax.transAxes,
+                ha="right",
+                va="bottom",
+                fontsize=7,
+                color="#666666",
+            )
 
         embedded_legend_handles: List[Line2D] = []
         for outcome_code in outcome_order:
@@ -1539,8 +1564,17 @@ def _plot_outcome_panel(trials: pd.DataFrame, mode: str, ax) -> None:
     ax.tick_params(axis="x", rotation=20)
 
 
-def plot_scope_overview(analysis: AnalysisData, rolling_window: int = 20) -> None:
+def plot_scope_overview(
+    analysis: AnalysisData,
+    rolling_window: int = 20,
+    *,
+    lick_time_window_sec: Tuple[float, float] = (-5.0, 10.0),
+    first_lick_window_sec: Tuple[float, float] = (0.0, 10.0),
+    first_lick_bin_width_sec: float = 0.25,
+    lick_auto_expand_window: bool = False,
+) -> None:
     import matplotlib.pyplot as plt
+    import numpy as np
 
     trials = _ordered_trials(analysis.trials)
     if trials.empty:
@@ -1565,7 +1599,12 @@ def plot_scope_overview(analysis: AnalysisData, rolling_window: int = 20) -> Non
     first_lick_sec = pd.Series(dtype=float)
     if not analysis.lick_df.empty and "lick_times_rel_stim_ms" in analysis.lick_df.columns:
         first_lick_ms = analysis.lick_df["lick_times_rel_stim_ms"].apply(_first_nonnegative)
-        first_lick_sec = (first_lick_ms / 1000.0).dropna()
+        first_lick_sec = (
+            (first_lick_ms / 1000.0)
+            .replace([float("inf"), float("-inf")], pd.NA)
+            .dropna()
+            .astype(float)
+        )
 
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
 
@@ -1588,13 +1627,53 @@ def plot_scope_overview(analysis: AnalysisData, rolling_window: int = 20) -> Non
 
     _plot_outcome_panel(trials, analysis.extraction.mode, axes[0, 1])
 
-    plot_lick_raster(analysis, ax=axes[1, 0], max_trials=120)
+    plot_lick_raster(
+        analysis,
+        ax=axes[1, 0],
+        max_trials=120,
+        time_window_sec=lick_time_window_sec,
+        auto_expand_window=lick_auto_expand_window,
+    )
 
     if not first_lick_sec.empty:
-        axes[1, 1].hist(first_lick_sec, bins=30, color="#457b9d", alpha=0.85)
+        hist_x_min, hist_x_max = float(first_lick_window_sec[0]), float(first_lick_window_sec[1])
+        if hist_x_max <= hist_x_min:
+            hist_x_max = hist_x_min + 1.0
+        hist_bin_width = max(float(first_lick_bin_width_sec), 0.01)
+        hist_edges = np.arange(hist_x_min, hist_x_max + hist_bin_width, hist_bin_width)
+        if len(hist_edges) < 2:
+            hist_edges = np.array([hist_x_min, hist_x_max], dtype=float)
+        in_window = first_lick_sec[(first_lick_sec >= hist_x_min) & (first_lick_sec <= hist_x_max)]
+        outside_count = int((first_lick_sec < hist_x_min).sum() + (first_lick_sec > hist_x_max).sum())
+
+        if not in_window.empty:
+            axes[1, 1].hist(in_window, bins=hist_edges, color="#457b9d", alpha=0.85)
+        else:
+            axes[1, 1].text(
+                0.5,
+                0.5,
+                "No first-lick data in window",
+                ha="center",
+                va="center",
+                transform=axes[1, 1].transAxes,
+            )
+
         axes[1, 1].set_title("First Lick Latency (>= 0s)")
         axes[1, 1].set_xlabel("Seconds from stimulus")
         axes[1, 1].set_ylabel("Count")
+        axes[1, 1].set_xlim(hist_x_min, hist_x_max)
+        axes[1, 1].grid(alpha=0.2, axis="x")
+        if outside_count > 0:
+            axes[1, 1].text(
+                0.99,
+                0.98,
+                f"outside window: {outside_count}",
+                ha="right",
+                va="top",
+                fontsize=8,
+                color="#666666",
+                transform=axes[1, 1].transAxes,
+            )
     else:
         axes[1, 1].text(0.5, 0.5, "No first-lick data", ha="center", va="center", transform=axes[1, 1].transAxes)
         axes[1, 1].set_axis_off()
@@ -1637,7 +1716,15 @@ def _display_heading(text: str, level: int = 3) -> None:
         print(text)
 
 
-def display_all_scope_results(context: AutoExtractionContext, rolling_window: int = 20) -> pd.DataFrame:
+def display_all_scope_results(
+    context: AutoExtractionContext,
+    rolling_window: int = 20,
+    *,
+    lick_time_window_sec: Tuple[float, float] = (-5.0, 10.0),
+    first_lick_window_sec: Tuple[float, float] = (0.0, 10.0),
+    first_lick_bin_width_sec: float = 0.25,
+    lick_auto_expand_window: bool = False,
+) -> pd.DataFrame:
     rows = [
         _scope_row("day", context.day),
         _scope_row("week", context.week),
@@ -1656,7 +1743,14 @@ def display_all_scope_results(context: AutoExtractionContext, rolling_window: in
     for label, analysis in [("DAY", context.day), ("WEEK", context.week), ("ALL", context.all_time)]:
         _display_heading(f"{label} Results", level=3)
         print("folders:", ", ".join(folder.name for folder in analysis.extraction.selected_folders))
-        plot_scope_overview(analysis, rolling_window=rolling_window)
+        plot_scope_overview(
+            analysis,
+            rolling_window=rolling_window,
+            lick_time_window_sec=lick_time_window_sec,
+            first_lick_window_sec=first_lick_window_sec,
+            first_lick_bin_width_sec=first_lick_bin_width_sec,
+            lick_auto_expand_window=lick_auto_expand_window,
+        )
 
     return summary_df
 
