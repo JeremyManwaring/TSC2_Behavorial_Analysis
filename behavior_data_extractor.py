@@ -154,8 +154,16 @@ def _select_folders(
             if not selected_anchor:
                 raise ValueError(f"Anchor day folder not found: {anchor_day}")
             anchor_date = selected_anchor[0][1]
-        start_day = anchor_date - timedelta(days=6)
-        return [item for item in dated_folders if start_day <= item[1] <= anchor_date]
+        anchor_iso = anchor_date.isocalendar()
+        anchor_iso_year = int(anchor_iso[0])
+        anchor_iso_week = int(anchor_iso[1])
+        return [
+            item
+            for item in dated_folders
+            if int(item[1].isocalendar()[0]) == anchor_iso_year
+            and int(item[1].isocalendar()[1]) == anchor_iso_week
+            and item[1].weekday() <= 4
+        ]
 
     if mode == "all":
         return dated_folders
@@ -1080,6 +1088,7 @@ def plot_lick_raster(
     # Embedded mode: compact summary for dashboard panels.
     if ax is not None or standalone_style != "faceted":
         raster_ax = ax if ax is not None else plt.gca()
+        present_outcomes = {int(rec["outcome"]) for rec in records}
         for idx, rec in enumerate(records, start=1):
             outcome_code = int(rec["outcome"])
             color = outcome_colors.get(outcome_code, other_color)
@@ -1097,6 +1106,69 @@ def plot_lick_raster(
         title_suffix = f" (first {len(records)} trials)" if len(records) < len(analysis.trials) else ""
         raster_ax.set_title(f"Stimulus-Aligned Licks{title_suffix}")
         raster_ax.grid(alpha=0.2, axis="x")
+
+        embedded_legend_handles: List[Line2D] = []
+        for outcome_code in outcome_order:
+            if outcome_code not in present_outcomes:
+                continue
+            embedded_legend_handles.append(
+                Line2D(
+                    [0],
+                    [0],
+                    color=outcome_colors[outcome_code],
+                    linewidth=1.8,
+                    label=outcome_labels[outcome_code],
+                )
+            )
+        has_other = any(code not in outcome_order for code in present_outcomes)
+        if has_other:
+            embedded_legend_handles.append(
+                Line2D(
+                    [0],
+                    [0],
+                    color=other_color,
+                    linewidth=1.8,
+                    label="Other",
+                )
+            )
+        embedded_legend_handles.append(
+            Line2D(
+                [0],
+                [0],
+                color=stim_color,
+                linestyle="--",
+                linewidth=1.2,
+                label="Stimulus Onset (t=0)",
+            )
+        )
+        if _reward_summary(records) is not None:
+            embedded_legend_handles.append(
+                Line2D(
+                    [0],
+                    [0],
+                    color=reward_color,
+                    linewidth=1.2,
+                    label="Reward Median",
+                )
+            )
+            embedded_legend_handles.append(
+                Patch(facecolor=reward_color, alpha=0.12, edgecolor="none", label="Reward IQR")
+            )
+
+        ncol = 2 if len(embedded_legend_handles) > 5 else 1
+        legend = raster_ax.legend(
+            handles=embedded_legend_handles,
+            loc="upper left",
+            fontsize=7,
+            frameon=True,
+            framealpha=0.85,
+            ncol=ncol,
+            borderpad=0.25,
+            labelspacing=0.25,
+            columnspacing=0.8,
+            handlelength=1.6,
+        )
+        legend.get_frame().set_edgecolor("#d0d0d0")
         if ax is None:
             plt.tight_layout()
             plt.show()
