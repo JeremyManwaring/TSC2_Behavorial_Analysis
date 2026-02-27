@@ -222,24 +222,42 @@ def extract_behavior_data(
     mode: str = "day",
     day_folder: Optional[str] = None,
     anchor_day: Optional[str] = None,
+    selected_day_folders: Optional[List[str]] = None,
 ) -> ExtractionResult:
     normalized_mode = mode.strip().lower()
     requested_anchor = anchor_day if anchor_day is not None else day_folder
     normalized_root, normalized_anchor = _normalize_root_and_day(root_folder, normalized_mode, requested_anchor)
     dated_folders = list_day_folders(normalized_root)
-    if normalized_mode == "week":
-        selected = _select_folders(
-            dated_folders,
-            normalized_mode,
-            day_folder=None,
-            anchor_day=normalized_anchor,
-        )
+
+    if selected_day_folders:
+        requested_names: List[str] = []
+        seen_names = set()
+        for name in selected_day_folders:
+            folder_name = str(name).strip()
+            if not folder_name or folder_name in seen_names:
+                continue
+            seen_names.add(folder_name)
+            requested_names.append(folder_name)
+        available = {folder.name: (folder, parsed) for folder, parsed in dated_folders}
+        missing = [name for name in requested_names if name not in available]
+        if missing:
+            raise ValueError(f"Selected day folder(s) not found: {', '.join(missing)}")
+        selected = [available[name] for name in requested_names]
+        selected.sort(key=lambda item: item[1])
     else:
-        selected = _select_folders(
-            dated_folders,
-            normalized_mode,
-            day_folder=normalized_anchor,
-        )
+        if normalized_mode == "week":
+            selected = _select_folders(
+                dated_folders,
+                normalized_mode,
+                day_folder=None,
+                anchor_day=normalized_anchor,
+            )
+        else:
+            selected = _select_folders(
+                dated_folders,
+                normalized_mode,
+                day_folder=normalized_anchor,
+            )
     files_by_type = _collect_files(selected)
     sessions = _session_id_map(selected)
 
@@ -583,12 +601,14 @@ def load_analysis_data(
     mode: str = "all",
     day_folder: Optional[str] = None,
     anchor_day: Optional[str] = None,
+    selected_day_folders: Optional[List[str]] = None,
 ) -> AnalysisData:
     extraction = extract_behavior_data(
         root_folder=root_folder,
         mode=mode,
         day_folder=day_folder,
         anchor_day=anchor_day,
+        selected_day_folders=selected_day_folders,
     )
     return build_analysis_data(extraction)
 
@@ -660,14 +680,30 @@ def apply_scope_aliases(
 def load_auto_context(
     root_folder: Union[str, Path],
     selected_day: Optional[str] = None,
+    selected_week_days: Optional[List[str]] = None,
     default_scope: str = "auto",
     namespace: Optional[MutableMapping[str, object]] = None,
 ) -> AutoExtractionContext:
     target_namespace = namespace if namespace is not None else __main__.__dict__
     resolved_day = _resolve_selected_day(root_folder, selected_day)
+    manual_week_days = [str(day).strip() for day in (selected_week_days or []) if str(day).strip()]
 
     day_data = load_analysis_data(root_folder=root_folder, mode="day", day_folder=resolved_day)
-    week_data = load_analysis_data(root_folder=root_folder, mode="week", anchor_day=resolved_day)
+    if manual_week_days:
+        week_data = load_analysis_data(
+            root_folder=root_folder,
+            mode="week",
+            anchor_day=resolved_day,
+            selected_day_folders=manual_week_days,
+        )
+    else:
+        # Manual week selection defaults to selected day only when no week folders are set.
+        week_data = load_analysis_data(
+            root_folder=root_folder,
+            mode="week",
+            anchor_day=resolved_day,
+            selected_day_folders=[resolved_day],
+        )
     all_data = load_analysis_data(root_folder=root_folder, mode="all")
 
     context = AutoExtractionContext(
@@ -1563,6 +1599,8 @@ def show_extraction_widget(default_folder: Union[str, Path] = "Jeremy"):
     from IPython.display import display
 
     most_recent_token = "__MOST_RECENT__"
+    manual_day: Optional[str] = None
+    manual_week_days: List[str] = []
 
     folder_input = widgets.Text(
         value=str(Path(default_folder).expanduser()),
@@ -1585,6 +1623,16 @@ def show_extraction_widget(default_folder: Union[str, Path] = "Jeremy"):
         disabled=False,
         layout=widgets.Layout(width="100%"),
     )
+    set_day_button = widgets.Button(description="Set Day")
+    week_input = widgets.SelectMultiple(
+        options=[],
+        value=(),
+        description="Week Days:",
+        layout=widgets.Layout(width="100%", height="120px"),
+    )
+    set_week_button = widgets.Button(description="Set Week Days")
+    selected_day_label = widgets.HTML(value="<span style='color:#666'>Locked day: Most Recent</span>")
+    selected_week_label = widgets.HTML(value="<span style='color:#666'>Locked week days: selected day only</span>")
     scan_button = widgets.Button(description="Scan Folders", button_style="info")
     extract_button = widgets.Button(description="Load + Plot", button_style="success")
     apply_scope_button = widgets.Button(description="Apply Default Scope")
@@ -1612,6 +1660,11 @@ def show_extraction_widget(default_folder: Union[str, Path] = "Jeremy"):
             folder_input,
             default_scope_input,
             day_input,
+            widgets.HBox([set_day_button]),
+            selected_day_label,
+            week_input,
+            widgets.HBox([set_week_button]),
+            selected_week_label,
             auto_plot_input,
             widgets.HBox([scan_button, extract_button, apply_scope_button, close_button]),
             status,
@@ -1631,26 +1684,76 @@ def show_extraction_widget(default_folder: Union[str, Path] = "Jeremy"):
     )
 
     def refresh_day_options() -> None:
+        nonlocal manual_day, manual_week_days
         try:
             folders = list_day_folders(folder_input.value)
             if not folders:
                 day_input.options = [("Most Recent", most_recent_token)]
+                week_input.options = []
+                week_input.value = ()
+                manual_day = None
+                manual_week_days = []
+                selected_day_label.value = "<span style='color:#666'>Locked day: Most Recent</span>"
+                selected_week_label.value = "<span style='color:#666'>Locked week days: selected day only</span>"
                 status.value = "<span style='color:#a33'>No YYMMDD folders found.</span>"
                 return
             options = [(f"Most Recent ({folders[-1][0].name})", most_recent_token)]
             options.extend((folder.name, folder.name) for folder, _ in folders)
             day_input.options = options
-            day_input.value = most_recent_token
+            folder_names = [folder.name for folder, _ in folders]
+            week_options = [(name, name) for name in folder_names]
+            week_input.options = week_options
+
+            if manual_day is not None and manual_day in folder_names:
+                day_input.value = manual_day
+            else:
+                if manual_day is not None and manual_day not in folder_names:
+                    status.value = (
+                        f"<span style='color:#a33'>Locked day {manual_day} not found after scan. "
+                        "Reset to Most Recent.</span>"
+                    )
+                manual_day = None
+                day_input.value = most_recent_token
+
+            valid_week = [name for name in manual_week_days if name in folder_names]
+            removed_week = [name for name in manual_week_days if name not in folder_names]
+            manual_week_days = valid_week
+            week_input.value = tuple(valid_week)
+
+            selected_day_display = manual_day if manual_day is not None else "Most Recent"
+            selected_day_label.value = f"<span style='color:#444'>Locked day: <b>{selected_day_display}</b></span>"
+            if manual_week_days:
+                selected_week_label.value = (
+                    "<span style='color:#444'>Locked week days: <b>"
+                    + ", ".join(manual_week_days)
+                    + "</b></span>"
+                )
+            else:
+                selected_week_label.value = "<span style='color:#666'>Locked week days: selected day only</span>"
+
             status.value = (
                 f"<span style='color:#2f6f37'>Found {len(folders)} folders. "
                 f"Most recent: <b>{folders[-1][0].name}</b>.</span>"
             )
+            if removed_week:
+                status.value += (
+                    "<br><span style='color:#a33'>Removed missing locked week day(s): "
+                    + ", ".join(removed_week)
+                    + "</span>"
+                )
         except Exception as exc:
             day_input.options = [("Most Recent", most_recent_token)]
+            week_input.options = []
+            week_input.value = ()
             status.value = f"<span style='color:#a33'>{exc}</span>"
 
     def selected_day_value() -> Optional[str]:
         return None if day_input.value == most_recent_token else str(day_input.value)
+
+    def active_day_value() -> Optional[str]:
+        if manual_day is not None:
+            return manual_day
+        return selected_day_value()
 
     def handle_launch(_):
         panel.layout.display = "none" if panel.layout.display == "flex" else "flex"
@@ -1663,15 +1766,47 @@ def show_extraction_widget(default_folder: Union[str, Path] = "Jeremy"):
     def handle_scan(_):
         refresh_day_options()
 
+    def handle_set_day(_):
+        nonlocal manual_day
+        manual_day = selected_day_value()
+        selected_day_display = manual_day if manual_day is not None else "Most Recent"
+        selected_day_label.value = f"<span style='color:#444'>Locked day: <b>{selected_day_display}</b></span>"
+        status.value = f"<span style='color:#2f6f37'>Locked day set to <b>{selected_day_display}</b>.</span>"
+
+    def handle_set_week(_):
+        nonlocal manual_week_days
+        manual_week_days = [str(value) for value in week_input.value]
+        if manual_week_days:
+            selected_week_label.value = (
+                "<span style='color:#444'>Locked week days: <b>"
+                + ", ".join(manual_week_days)
+                + "</b></span>"
+            )
+            status.value = (
+                f"<span style='color:#2f6f37'>Locked week days set ({len(manual_week_days)}): "
+                f"<b>{', '.join(manual_week_days)}</b>.</span>"
+            )
+        else:
+            selected_week_label.value = "<span style='color:#666'>Locked week days: selected day only</span>"
+            status.value = "<span style='color:#2f6f37'>Locked week days cleared. WEEK will use selected day only.</span>"
+
     def handle_extract(_):
         with output:
             output.clear_output()
             try:
+                chosen_day = active_day_value()
+                week_days = list(manual_week_days)
                 context = load_auto_context(
                     root_folder=folder_input.value,
-                    selected_day=selected_day_value(),
+                    selected_day=chosen_day,
+                    selected_week_days=week_days,
                     default_scope=default_scope_input.value,
                 )
+                day_text = chosen_day if chosen_day is not None else "Most Recent"
+                week_text = ", ".join(week_days) if week_days else f"{context.selected_day} (selected day only)"
+                print(f"Manual DAY selection: {day_text}")
+                print(f"Manual WEEK selection: {week_text}")
+                print()
                 print(context.summary_text())
                 print()
                 print("Notebook variables updated:")
@@ -1705,6 +1840,8 @@ def show_extraction_widget(default_folder: Union[str, Path] = "Jeremy"):
     launch_button.on_click(handle_launch)
     close_button.on_click(handle_close)
     scan_button.on_click(handle_scan)
+    set_day_button.on_click(handle_set_day)
+    set_week_button.on_click(handle_set_week)
     extract_button.on_click(handle_extract)
     apply_scope_button.on_click(handle_apply_scope)
 
