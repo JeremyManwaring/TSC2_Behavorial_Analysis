@@ -1608,15 +1608,6 @@ def show_extraction_widget(default_folder: Union[str, Path] = "Jeremy"):
         placeholder="/path/to/Jeremy",
         layout=widgets.Layout(width="100%"),
     )
-    default_scope_input = widgets.ToggleButtons(
-        options=[
-            ("Auto", "auto"),
-            ("Day", "day"),
-            ("Week", "week"),
-            ("All", "all"),
-        ],
-        description="Default:",
-    )
     day_input = widgets.Dropdown(
         options=[("Most Recent", most_recent_token)],
         description="Anchor Day:",
@@ -1635,11 +1626,9 @@ def show_extraction_widget(default_folder: Union[str, Path] = "Jeremy"):
     selected_week_label = widgets.HTML(value="<span style='color:#666'>Locked week days: selected day only</span>")
     scan_button = widgets.Button(description="Scan Folders", button_style="info")
     extract_button = widgets.Button(description="Load + Plot", button_style="success")
-    apply_scope_button = widgets.Button(description="Apply Default Scope")
     close_button = widgets.Button(description="Close")
-    auto_plot_input = widgets.Checkbox(value=True, description="Show day/week/all plots")
     status = widgets.HTML()
-    output = widgets.Output(layout=widgets.Layout(max_height="260px", overflow_y="auto"))
+    output = widgets.Output(layout=widgets.Layout(max_height="460px", overflow_y="auto", width="100%"))
 
     launch_button = widgets.Button(
         description="Open Data Extractor",
@@ -1658,15 +1647,13 @@ def show_extraction_widget(default_folder: Union[str, Path] = "Jeremy"):
         [
             widgets.HTML("<b>Behavior Data Extractor</b>"),
             folder_input,
-            default_scope_input,
             day_input,
             widgets.HBox([set_day_button]),
             selected_day_label,
             week_input,
             widgets.HBox([set_week_button]),
             selected_week_label,
-            auto_plot_input,
-            widgets.HBox([scan_button, extract_button, apply_scope_button, close_button]),
+            widgets.HBox([scan_button, extract_button, close_button]),
             status,
             output,
         ],
@@ -1675,13 +1662,19 @@ def show_extraction_widget(default_folder: Union[str, Path] = "Jeremy"):
             position="fixed",
             bottom="70px",
             right="20px",
-            width="520px",
+            width="900px",
+            max_width="92vw",
+            height="84vh",
+            max_height="88vh",
             border="1px solid #d0d0d0",
             padding="10px",
             background_color="white",
             z_index="9999",
+            overflow_y="auto",
         ),
     )
+
+    week_input.layout.height = "220px"
 
     def refresh_day_options() -> None:
         nonlocal manual_day, manual_week_days
@@ -1800,7 +1793,7 @@ def show_extraction_widget(default_folder: Union[str, Path] = "Jeremy"):
                     root_folder=folder_input.value,
                     selected_day=chosen_day,
                     selected_week_days=week_days,
-                    default_scope=default_scope_input.value,
+                    default_scope="week",
                 )
                 day_text = chosen_day if chosen_day is not None else "Most Recent"
                 week_text = ", ".join(week_days) if week_days else f"{context.selected_day} (selected day only)"
@@ -1817,25 +1810,12 @@ def show_extraction_widget(default_folder: Union[str, Path] = "Jeremy"):
                 print("Default aliases:")
                 print("  trials, lick_df, stimulus_data, header_data")
                 print(f"Active alias scope: {context.resolved_scope}")
-                if auto_plot_input.value:
-                    print()
-                    print("Rendering day/week/all plots...")
-                    summary_df = display_all_scope_results(context)
-                    print(f"Rendered all scopes ({len(summary_df)} rows in summary table).")
+                print()
+                print("Rendering day/week/all plots...")
+                summary_df = display_all_scope_results(context)
+                print(f"Rendered all scopes ({len(summary_df)} rows in summary table).")
             except Exception as exc:
                 print(f"Extraction failed: {exc}")
-
-    def handle_apply_scope(_):
-        with output:
-            try:
-                if LAST_AUTO_CONTEXT is None:
-                    print("No loaded context yet. Click 'Load Folder' first.")
-                    return
-                resolved = apply_scope_aliases(LAST_AUTO_CONTEXT, scope=default_scope_input.value)
-                LAST_AUTO_CONTEXT.resolved_scope = resolved
-                print(f"Applied default aliases to scope: {resolved}")
-            except Exception as exc:
-                print(f"Scope update failed: {exc}")
 
     launch_button.on_click(handle_launch)
     close_button.on_click(handle_close)
@@ -1843,7 +1823,6 @@ def show_extraction_widget(default_folder: Union[str, Path] = "Jeremy"):
     set_day_button.on_click(handle_set_day)
     set_week_button.on_click(handle_set_week)
     extract_button.on_click(handle_extract)
-    apply_scope_button.on_click(handle_apply_scope)
 
     display(launch_button)
     display(panel)

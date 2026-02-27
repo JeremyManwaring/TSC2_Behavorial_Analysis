@@ -8,7 +8,6 @@ What it does:
 
 Optional:
 - Set DATA_FOLDER to your own Jeremy data folder in Drive.
-- Set AUTO_PRELOAD_AND_PLOT to True to render day/week/all graphs immediately.
 """
 
 import subprocess
@@ -22,7 +21,6 @@ REPO_DIR = Path("/content/TSC2_Behavorial_Analysis")
 # Set this to your Drive path if you want your own data, for example:
 # DATA_FOLDER = "/content/drive/MyDrive/TSC2/Jeremy"
 DATA_FOLDER = None
-AUTO_PRELOAD_AND_PLOT = True
 
 
 def run(cmd: list[str]) -> None:
@@ -52,7 +50,7 @@ if DATA_FOLDER is None:
 if "behavior_data_extractor" in sys.modules:
     del sys.modules["behavior_data_extractor"]
 
-from behavior_data_extractor import display_all_scope_results, load_auto_context, show_extraction_widget
+from behavior_data_extractor import show_extraction_widget
 
 if DATA_FOLDER is None:
     DATA_FOLDER = str(REPO_DIR / "Jeremy")
@@ -61,11 +59,4 @@ else:
     print(f"Using DATA_FOLDER: {DATA_FOLDER}")
 
 show_extraction_widget(DATA_FOLDER)
-if AUTO_PRELOAD_AND_PLOT:
-    context = load_auto_context(DATA_FOLDER, selected_day=None, default_scope="auto")
-    display_all_scope_results(context)
-    print("Preloaded and rendered: day/week/all")
-else:
-    print("Optional preload:")
-    print("context = load_auto_context(DATA_FOLDER, selected_day=None, default_scope='auto')")
-    print("display_all_scope_results(context)")
+print("Data extractor ready. Select folders and click 'Load + Plot' in the panel.")
