@@ -330,12 +330,93 @@ def _lick_timestamp_columns(lick_table: pd.DataFrame) -> List[Union[int, str]]:
     return sorted(lick_columns, key=lambda c: int(c))
 
 
+def _resolve_stimulus_time_mode(trials: pd.DataFrame, tolerance_ms: float = 1.0) -> str:
+    required = {"TrStartTime", "StimOnsetTime", "TrEndTime"}
+    if trials.empty or not required.issubset(set(trials.columns)):
+        return "relative"
+
+    tr_start = pd.to_numeric(trials["TrStartTime"], errors="coerce")
+    stim_on = pd.to_numeric(trials["StimOnsetTime"], errors="coerce")
+    tr_end = pd.to_numeric(trials["TrEndTime"], errors="coerce")
+    valid_mask = tr_start.notna() & stim_on.notna() & tr_end.notna() & (tr_end >= tr_start - tolerance_ms)
+    if not bool(valid_mask.any()):
+        return "relative"
+
+    start_valid = tr_start[valid_mask]
+    stim_valid = stim_on[valid_mask]
+    end_valid = tr_end[valid_mask]
+    abs_hits = int(((stim_valid >= start_valid - tolerance_ms) & (stim_valid <= end_valid + tolerance_ms)).sum())
+    n_valid = int(valid_mask.sum())
+    if abs_hits >= (n_valid / 2.0):
+        return "absolute"
+    return "relative"
+
+
+def _stimulus_absolute_timestamp(tr_start_ms: float, stim_on_ms: float, stim_mode: str) -> float:
+    if stim_mode == "absolute":
+        return stim_on_ms
+    return tr_start_ms + stim_on_ms
+
+
+def _normalize_lick_timestamp(
+    lick_value_ms: float,
+    tr_start_ms: float,
+    tr_end_ms: float,
+    stim_abs_ms: float,
+    session_min_ms: Optional[float],
+    session_max_ms: Optional[float],
+    stim_mode: str,
+) -> Optional[float]:
+    if not pd.notna(lick_value_ms) or lick_value_ms < 0 or lick_value_ms > 2e9:
+        return None
+    if not pd.notna(stim_abs_ms) or not pd.notna(tr_start_ms):
+        return None
+
+    rel_if_abs = lick_value_ms - stim_abs_ms
+    rel_if_rel = (tr_start_ms + lick_value_ms) - stim_abs_ms
+    plausible_min = -10000.0
+    plausible_max = 120000.0
+
+    abs_plausible = plausible_min <= rel_if_abs <= plausible_max
+    rel_plausible = plausible_min <= rel_if_rel <= plausible_max
+
+    if abs_plausible and not rel_plausible:
+        return lick_value_ms
+    if rel_plausible and not abs_plausible:
+        return tr_start_ms + lick_value_ms
+
+    trial_dur_ms = max(tr_end_ms - tr_start_ms, 0.0) if pd.notna(tr_end_ms) else 0.0
+    session_like = (
+        session_min_ms is not None
+        and session_max_ms is not None
+        and session_min_ms - 2000.0 <= lick_value_ms <= session_max_ms + 2000.0
+    )
+    relative_like = -1000.0 <= lick_value_ms <= trial_dur_ms + 30000.0
+
+    if stim_mode == "absolute":
+        if session_like:
+            return lick_value_ms
+        if relative_like:
+            return tr_start_ms + lick_value_ms
+    else:
+        if relative_like:
+            return tr_start_ms + lick_value_ms
+        if session_like:
+            return lick_value_ms
+
+    if abs(rel_if_abs) <= abs(rel_if_rel):
+        return lick_value_ms
+    return tr_start_ms + lick_value_ms
+
+
 def _build_relative_lick_df(trials: pd.DataFrame, lick_table: pd.DataFrame) -> pd.DataFrame:
     expected_cols = ["mouse", "date", "session", "TrNum", "week", "session_id", "lick_times_rel_stim_ms"]
     if trials.empty or lick_table.empty:
         return pd.DataFrame(columns=expected_cols)
 
+    stim_mode = _resolve_stimulus_time_mode(trials)
     trial_lookup: Dict[Tuple[str, int, int], Dict[str, object]] = {}
+    session_bounds: Dict[Tuple[str, int], Dict[str, float]] = {}
     for _, row in trials.iterrows():
         try:
             tr_num = int(row["TrNum"])
@@ -343,6 +424,10 @@ def _build_relative_lick_df(trials: pd.DataFrame, lick_table: pd.DataFrame) -> p
             continue
         session_num = int(row.get("session", -1))
         day_folder = str(row.get("_day_folder", ""))
+        tr_start = float(row.get("TrStartTime", 0) or 0)
+        tr_end = float(row.get("TrEndTime", tr_start) or tr_start)
+        stim_on = float(row.get("StimOnsetTime", 500) or 500)
+        stim_abs = _stimulus_absolute_timestamp(tr_start, stim_on, stim_mode)
         trial_lookup[(day_folder, session_num, tr_num)] = {
             "mouse": row.get("mouse"),
             "date": row.get("date"),
@@ -350,9 +435,18 @@ def _build_relative_lick_df(trials: pd.DataFrame, lick_table: pd.DataFrame) -> p
             "TrNum": tr_num,
             "week": int(row.get("week")) if pd.notna(row.get("week")) else -1,
             "session_id": row.get("session_id"),
-            "TrStartTime": float(row.get("TrStartTime", 0) or 0),
-            "StimOnsetTime": float(row.get("StimOnsetTime", 500) or 500),
+            "TrStartTime": tr_start,
+            "TrEndTime": tr_end,
+            "StimAbsTime": stim_abs,
         }
+        session_key = (day_folder, session_num)
+        bounds = session_bounds.setdefault(session_key, {"min": float("inf"), "max": float("-inf")})
+        if pd.notna(tr_start):
+            bounds["min"] = min(bounds["min"], tr_start)
+            bounds["max"] = max(bounds["max"], tr_start)
+        if pd.notna(tr_end):
+            bounds["min"] = min(bounds["min"], tr_end)
+            bounds["max"] = max(bounds["max"], tr_end)
 
     lick_cols = _lick_timestamp_columns(lick_table)
     aggregated: Dict[Tuple[str, int], Dict[str, object]] = {}
@@ -373,6 +467,13 @@ def _build_relative_lick_df(trials: pd.DataFrame, lick_table: pd.DataFrame) -> p
         trial_info = trial_lookup.get((day_folder, session_num, tr_num))
         if trial_info is None:
             continue
+        bounds = session_bounds.get((day_folder, session_num), {})
+        session_min = bounds.get("min")
+        session_max = bounds.get("max")
+        if session_min is not None and not pd.notna(session_min):
+            session_min = None
+        if session_max is not None and not pd.notna(session_max):
+            session_max = None
 
         lick_times: List[float] = []
         for col in lick_cols:
@@ -381,10 +482,23 @@ def _build_relative_lick_df(trials: pd.DataFrame, lick_table: pd.DataFrame) -> p
                 t = float(value)
             except Exception:
                 continue
-            if pd.isna(t) or t <= 0 or t > 1e7:
+            if pd.isna(t):
                 continue
-            rel_stim = (t - float(trial_info["TrStartTime"])) - float(trial_info["StimOnsetTime"])
-            lick_times.append(rel_stim)
+            normalized_abs = _normalize_lick_timestamp(
+                lick_value_ms=t,
+                tr_start_ms=float(trial_info["TrStartTime"]),
+                tr_end_ms=float(trial_info["TrEndTime"]),
+                stim_abs_ms=float(trial_info["StimAbsTime"]),
+                session_min_ms=float(session_min) if session_min is not None else None,
+                session_max_ms=float(session_max) if session_max is not None else None,
+                stim_mode=stim_mode,
+            )
+            if normalized_abs is None:
+                continue
+            rel_stim = normalized_abs - float(trial_info["StimAbsTime"])
+            if not pd.notna(rel_stim):
+                continue
+            lick_times.append(float(rel_stim))
 
         aggregate_key = (str(trial_info["session_id"]), tr_num)
         if aggregate_key not in aggregated:
@@ -407,6 +521,8 @@ def _build_relative_lick_df(trials: pd.DataFrame, lick_table: pd.DataFrame) -> p
             int(row["TrNum"]),
         )
     )
+    for row in lick_rows:
+        row["lick_times_rel_stim_ms"] = sorted(row["lick_times_rel_stim_ms"])
     return pd.DataFrame(lick_rows, columns=expected_cols)
 
 
@@ -426,9 +542,18 @@ def build_analysis_data(extraction: ExtractionResult) -> AnalysisData:
         trials["outcome_label"] = pd.to_numeric(trials["TrOutcome"], errors="coerce").map(outcome_map)
 
     time_cols = {"RWStartTime", "RWEndTime", "TrStartTime", "StimOnsetTime"}
-    if not trials.empty and time_cols.issubset(set(trials.columns)):
-        trials["RWStart_rel_stim"] = trials["RWStartTime"] - trials["TrStartTime"] - trials["StimOnsetTime"]
-        trials["RWEnd_rel_stim"] = trials["RWEndTime"] - trials["TrStartTime"] - trials["StimOnsetTime"]
+    if not trials.empty and {"TrStartTime", "StimOnsetTime"}.issubset(set(trials.columns)):
+        stim_mode = _resolve_stimulus_time_mode(trials)
+        tr_start = pd.to_numeric(trials["TrStartTime"], errors="coerce")
+        stim_on = pd.to_numeric(trials["StimOnsetTime"], errors="coerce")
+        stim_abs = stim_on if stim_mode == "absolute" else tr_start + stim_on
+        trials["StimAbsTime"] = stim_abs
+        trials["StimTimeMode"] = stim_mode
+    if not trials.empty and time_cols.issubset(set(trials.columns)) and "StimAbsTime" in trials.columns:
+        rw_start = pd.to_numeric(trials["RWStartTime"], errors="coerce")
+        rw_end = pd.to_numeric(trials["RWEndTime"], errors="coerce")
+        trials["RWStart_rel_stim"] = rw_start - trials["StimAbsTime"]
+        trials["RWEnd_rel_stim"] = rw_end - trials["StimAbsTime"]
 
     lick_df = _build_relative_lick_df(trials, raw_lick)
 
@@ -829,10 +954,20 @@ def _trial_licks_by_key(analysis: AnalysisData) -> Dict[Tuple[str, int], List[fl
     return by_key
 
 
-def plot_lick_raster(analysis: AnalysisData, ax=None, max_trials: int = 200) -> int:
+def plot_lick_raster(
+    analysis: AnalysisData,
+    ax=None,
+    max_trials: int = 200,
+    *,
+    time_window_sec: Tuple[float, float] = (-1.0, 4.0),
+    bin_width_sec: float = 0.05,
+    include_other_outcomes: bool = True,
+    standalone_style: str = "faceted",
+) -> int:
     import matplotlib.pyplot as plt
     import numpy as np
     from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
 
     trials = _ordered_trials(analysis.trials)
     needed_cols = {"session_id", "TrNum", "TrStartTime", "TrEndTime", "StimOnsetTime"}
@@ -846,8 +981,9 @@ def plot_lick_raster(analysis: AnalysisData, ax=None, max_trials: int = 200) -> 
 
     trials = trials.head(max_trials).copy()
     lick_map = _trial_licks_by_key(analysis)
+    stim_mode = _resolve_stimulus_time_mode(trials)
 
-    outcome_order = [1, 4, 3, 2]  # Hit, Miss, FA, CR
+    outcome_order = [1, 4, 3, 2]  # Hit, Miss, False Alarm, Correct Rejection
     outcome_labels = {
         1: "Hit",
         4: "Miss",
@@ -860,75 +996,45 @@ def plot_lick_raster(analysis: AnalysisData, ax=None, max_trials: int = 200) -> 
         3: "#d62728",
         2: "#2ca02c",
     }
-    fallback_color = "#3a3a3a"
+    other_color = "#3a3a3a"
     reward_color = "#f59e0b"
-
-    trials["_TrNum_num"] = pd.to_numeric(trials["TrNum"], errors="coerce")
-    trials["_TrOutcome_num"] = pd.to_numeric(trials.get("TrOutcome"), errors="coerce")
-    trials["_outcome_sort"] = pd.Categorical(trials["_TrOutcome_num"], categories=outcome_order, ordered=True)
-    trials = trials.sort_values(["_outcome_sort", "_TrNum_num"], kind="mergesort", na_position="last").reset_index(
-        drop=True
-    )
-
-    own_fig = False
-    psth_ax = None
-    if ax is None:
-        own_fig = True
-        fig, (psth_ax, raster_ax) = plt.subplots(
-            2,
-            1,
-            figsize=(11, 8),
-            gridspec_kw={"height_ratios": [1, 3]},
-            sharex=True,
-        )
-    else:
-        raster_ax = ax
+    stim_color = "black"
 
     records: List[Dict[str, object]] = []
     for _, tr_row in trials.iterrows():
-        tr_num_num = tr_row.get("_TrNum_num")
-        if pd.isna(tr_num_num):
+        tr_num_raw = pd.to_numeric(tr_row.get("TrNum"), errors="coerce")
+        if pd.isna(tr_num_raw):
             continue
-        tr_num = int(float(tr_num_num))
+        tr_num = int(float(tr_num_raw))
         session_id = str(tr_row.get("session_id", ""))
 
         tr_start = _safe_float(tr_row.get("TrStartTime"), default=0.0)
-        tr_end = _safe_float(tr_row.get("TrEndTime"), default=0.0)
+        tr_end = _safe_float(tr_row.get("TrEndTime"), default=tr_start)
         stim_on = _safe_float(tr_row.get("StimOnsetTime"), default=0.0)
+        stim_abs = _safe_float(tr_row.get("StimAbsTime"), default=float("nan"))
+        if not pd.notna(stim_abs):
+            stim_abs = _stimulus_absolute_timestamp(tr_start, stim_on, stim_mode)
         rw_start = _safe_float(tr_row.get("RWStartTime"), default=float("nan"))
-        stim_abs = tr_start + stim_on
+        rw_sec = (rw_start - stim_abs) / 1000.0 if pd.notna(rw_start) and pd.notna(stim_abs) else float("nan")
 
-        tr_start_aligned_sec = (tr_start - stim_abs) / 1000.0
-        tr_end_aligned_sec = (tr_end - stim_abs) / 1000.0
-        if tr_end_aligned_sec < tr_start_aligned_sec:
-            tr_end_aligned_sec = tr_start_aligned_sec
-
-        rw_aligned_sec = (rw_start - stim_abs) / 1000.0 if pd.notna(rw_start) else float("nan")
-        if not pd.notna(rw_aligned_sec):
-            rw_aligned_sec = float("nan")
-
-        licks_rel_stim = lick_map.get((session_id, tr_num), [])
-        licks_aligned_sec: List[float] = []
-        for lick_ms in licks_rel_stim:
+        licks_ms = lick_map.get((session_id, tr_num), [])
+        licks_sec: List[float] = []
+        for lick_ms in licks_ms:
             try:
-                lick_sec = float(lick_ms) / 1000.0
+                value_sec = float(lick_ms) / 1000.0
             except Exception:
                 continue
-            if not np.isfinite(lick_sec):
-                continue
-            licks_aligned_sec.append(lick_sec)
+            if np.isfinite(value_sec):
+                licks_sec.append(value_sec)
 
         outcome_raw = pd.to_numeric(tr_row.get("TrOutcome"), errors="coerce")
         outcome_code = int(outcome_raw) if not pd.isna(outcome_raw) else -1
-
         records.append(
             {
                 "tr_num": tr_num,
                 "outcome": outcome_code,
-                "start_sec": float(tr_start_aligned_sec),
-                "end_sec": float(tr_end_aligned_sec),
-                "reward_sec": float(rw_aligned_sec),
-                "licks_sec": licks_aligned_sec,
+                "licks_sec": sorted(licks_sec),
+                "reward_sec": float(rw_sec),
             }
         )
 
@@ -940,219 +1046,144 @@ def plot_lick_raster(analysis: AnalysisData, ax=None, max_trials: int = 200) -> 
             print("No lick raster data.")
         return 0
 
-    outcome_counts: Dict[int, int] = {}
-    all_licks: List[float] = []
-    x_mins: List[float] = []
-    x_maxs: List[float] = []
-    for rec in records:
-        outcome_code = int(rec["outcome"])
-        outcome_counts[outcome_code] = outcome_counts.get(outcome_code, 0) + 1
-        start_sec = float(rec["start_sec"])
-        end_sec = float(rec["end_sec"])
-        x_mins.append(start_sec)
-        x_maxs.append(end_sec)
-        reward_sec = float(rec["reward_sec"])
-        if np.isfinite(reward_sec):
-            x_mins.append(reward_sec)
-            x_maxs.append(reward_sec)
-        licks = [float(x) for x in rec["licks_sec"]]
-        if licks:
-            all_licks.extend(licks)
-            x_mins.append(min(licks))
-            x_maxs.append(max(licks))
-
+    all_licks = [float(lick) for rec in records for lick in rec["licks_sec"]]
     total_points = len(all_licks)
-    for plot_idx, rec in enumerate(records):
-        start_sec = float(rec["start_sec"])
-        end_sec = float(rec["end_sec"])
-        outcome_code = int(rec["outcome"])
-        lick_color = outcome_colors.get(outcome_code, fallback_color)
-        licks_sec = [float(x) for x in rec["licks_sec"]]
-
-        raster_ax.hlines(
-            y=plot_idx,
-            xmin=start_sec,
-            xmax=end_sec,
-            color="gray",
-            alpha=0.2,
-            linewidth=5,
-            zorder=1,
-        )
-        if licks_sec:
-            raster_ax.vlines(
-                licks_sec,
-                ymin=plot_idx - 0.4,
-                ymax=plot_idx + 0.4,
-                color=lick_color,
-                alpha=0.9,
-                linewidth=0.9,
-                zorder=2,
-            )
-
-        reward_sec = float(rec["reward_sec"])
-        if np.isfinite(reward_sec):
-            raster_ax.scatter(
-                reward_sec,
-                plot_idx,
-                s=24,
-                marker="D",
-                color=reward_color,
-                edgecolors="black",
-                linewidths=0.35,
-                zorder=3,
-            )
-
-    raster_ax.axvline(0, color="black", linestyle="--", linewidth=1.5, alpha=0.95, zorder=0)
-
-    # Draw subtle separators so outcome groups appear as distinct trial blocks.
-    group_labels: List[str] = []
-    group_tick_positions: List[float] = []
-    group_boundaries: List[float] = []
-    group_start = 0
-    previous_outcome = int(records[0]["outcome"])
-    for row_idx, rec in enumerate(records[1:], start=1):
-        current_outcome = int(rec["outcome"])
-        if current_outcome != previous_outcome:
-            group_end = row_idx - 1
-            group_center = (group_start + group_end) / 2.0
-            label = outcome_labels.get(previous_outcome, f"Outcome {previous_outcome}")
-            group_labels.append(f"{label} (n={group_end - group_start + 1})")
-            group_tick_positions.append(group_center)
-            group_boundaries.append(row_idx - 0.5)
-            group_start = row_idx
-            previous_outcome = current_outcome
-
-    final_group_end = len(records) - 1
-    final_label = outcome_labels.get(previous_outcome, f"Outcome {previous_outcome}")
-    group_labels.append(f"{final_label} (n={final_group_end - group_start + 1})")
-    group_tick_positions.append((group_start + final_group_end) / 2.0)
-
-    for boundary in group_boundaries:
-        raster_ax.axhline(boundary, color="black", linewidth=0.8, alpha=0.2, zorder=0)
-
-    raster_ax.set_yticks(group_tick_positions)
-    raster_ax.set_yticklabels(group_labels)
-    raster_ax.set_ylabel("Trials (sorted by outcome)")
-    raster_ax.set_xlabel("Time from Stimulus Onset (s)")
-    title_suffix = f" (first {len(records)} trials)" if len(records) < len(analysis.trials) else ""
-    raster_ax.set_title(f"Stimulus-Aligned Lick Raster{title_suffix}")
-    raster_ax.grid(alpha=0.2, axis="x")
-    raster_ax.invert_yaxis()
-
-    # Build a robust view window from trial windows, rewards, and lick timestamps.
-    default_min = min(x_mins) if x_mins else -0.5
-    default_max = max(x_maxs) if x_maxs else 1.5
+    x_min, x_max = float(time_window_sec[0]), float(time_window_sec[1])
     if all_licks:
         lick_series = pd.Series(all_licks, dtype=float).replace([float("inf"), float("-inf")], pd.NA).dropna()
         if not lick_series.empty:
-            q_low = float(lick_series.quantile(0.01))
-            q_high = float(lick_series.quantile(0.99))
-            default_min = min(default_min, q_low)
-            default_max = max(default_max, q_high)
-    view_min = min(default_min, -0.25)
-    view_max = max(default_max, 0.75)
-    if view_max <= view_min:
-        view_max = view_min + 1.0
-    x_pad = 0.05 * max(1.0, view_max - view_min)
-    raster_ax.set_xlim([view_min - x_pad, view_max + x_pad])
+            q01 = float(lick_series.quantile(0.01))
+            q99 = float(lick_series.quantile(0.99))
+            if q01 < x_min - 0.5:
+                x_min = q01 - 0.2
+            if q99 > x_max + 0.5:
+                x_max = q99 + 0.2
+    if x_max <= x_min:
+        x_max = x_min + 1.0
+
+    def _reward_summary(rows: List[Dict[str, object]]) -> Optional[Tuple[float, float, float]]:
+        rewards = [float(r["reward_sec"]) for r in rows if np.isfinite(float(r["reward_sec"]))]
+        if not rewards:
+            return None
+        arr = np.array(rewards, dtype=float)
+        q1, med, q3 = np.quantile(arr, [0.25, 0.5, 0.75])
+        return float(q1), float(med), float(q3)
+
+    def _plot_reward_band(target_ax, rows: List[Dict[str, object]]) -> None:
+        summary = _reward_summary(rows)
+        if summary is None:
+            return
+        q1, med, q3 = summary
+        target_ax.axvspan(q1, q3, color=reward_color, alpha=0.12, linewidth=0, zorder=0)
+        target_ax.axvline(med, color=reward_color, linewidth=1.2, alpha=0.95, zorder=1)
+
+    # Embedded mode: compact summary for dashboard panels.
+    if ax is not None or standalone_style != "faceted":
+        raster_ax = ax if ax is not None else plt.gca()
+        for idx, rec in enumerate(records, start=1):
+            outcome_code = int(rec["outcome"])
+            color = outcome_colors.get(outcome_code, other_color)
+            licks = [float(v) for v in rec["licks_sec"]]
+            if licks:
+                raster_ax.vlines(licks, idx - 0.35, idx + 0.35, color=color, linewidth=0.6, alpha=0.8)
+        _plot_reward_band(raster_ax, records)
+        raster_ax.axvline(0, color=stim_color, linestyle="--", linewidth=1.2, alpha=0.9)
+        raster_ax.set_xlim([x_min, x_max])
+        raster_ax.set_ylim([0.5, len(records) + 0.5])
+        raster_ax.invert_yaxis()
+        raster_ax.set_yticks([])
+        raster_ax.set_ylabel("Trials")
+        raster_ax.set_xlabel("Time from Stimulus Onset (s)")
+        title_suffix = f" (first {len(records)} trials)" if len(records) < len(analysis.trials) else ""
+        raster_ax.set_title(f"Stimulus-Aligned Licks{title_suffix}")
+        raster_ax.grid(alpha=0.2, axis="x")
+        if ax is None:
+            plt.tight_layout()
+            plt.show()
+        return total_points
+
+    # Standalone faceted mode.
+    outcome_groups: List[Tuple[str, List[Dict[str, object]], str]] = []
+    for outcome_code in outcome_order:
+        rows = [rec for rec in records if int(rec["outcome"]) == outcome_code]
+        label = outcome_labels[outcome_code]
+        color = outcome_colors[outcome_code]
+        outcome_groups.append((label, rows, color))
+
+    other_codes = sorted({int(rec["outcome"]) for rec in records if int(rec["outcome"]) not in outcome_order})
+    if include_other_outcomes and other_codes:
+        other_rows = [rec for rec in records if int(rec["outcome"]) in other_codes]
+        outcome_groups.append((f"Other ({', '.join(str(c) for c in other_codes)})", other_rows, other_color))
+
+    n_panels = len(outcome_groups)
+    fig_height = 2.2 + (1.35 * n_panels)
+    fig = plt.figure(figsize=(12, fig_height))
+    gs = fig.add_gridspec(1 + n_panels, 1, height_ratios=[1.2] + [1.0] * n_panels, hspace=0.10)
+
+    psth_ax = fig.add_subplot(gs[0, 0])
+    raster_axes = [fig.add_subplot(gs[idx + 1, 0], sharex=psth_ax) for idx in range(n_panels)]
+
+    # PSTH by outcome group.
+    edges = np.arange(x_min, x_max + bin_width_sec, bin_width_sec)
+    if len(edges) < 2:
+        edges = np.array([x_min, x_max + max(0.1, bin_width_sec)])
+    centers = edges[:-1] + (bin_width_sec / 2.0)
 
     legend_handles: List[Line2D] = []
-    for outcome_code in outcome_order:
-        n_trials = outcome_counts.get(outcome_code, 0)
-        if n_trials <= 0:
+    for label, rows, color in outcome_groups:
+        trial_count = len(rows)
+        if trial_count <= 0:
             continue
-        legend_handles.append(
-            Line2D(
-                [0],
-                [0],
-                color=outcome_colors[outcome_code],
-                linewidth=2.0,
-                label=f"{outcome_labels[outcome_code]} (n={n_trials})",
-            )
-        )
-    unknown_outcomes = sorted(code for code in outcome_counts if code not in outcome_order)
-    for outcome_code in unknown_outcomes:
-        n_trials = outcome_counts.get(outcome_code, 0)
-        legend_handles.append(
-            Line2D(
-                [0],
-                [0],
-                color=fallback_color,
-                linewidth=2.0,
-                label=f"Outcome {outcome_code} (n={n_trials})",
-            )
-        )
-    legend_handles.append(
-        Line2D(
-            [0],
-            [0],
-            marker="D",
-            linestyle="None",
-            markersize=6,
-            markerfacecolor=reward_color,
-            markeredgecolor="black",
-            label="Reward (RWStartTime)",
-        )
-    )
-    legend_handles.append(
-        Line2D(
-            [0],
-            [0],
-            color="black",
-            linestyle="--",
-            linewidth=1.5,
-            label="Stimulus Onset (t=0)",
-        )
-    )
-    raster_ax.legend(handles=legend_handles, loc="upper right", fontsize=8, frameon=False)
+        licks = [float(v) for rec in rows for v in rec["licks_sec"]]
+        if not licks:
+            continue
+        counts, _ = np.histogram(np.array(licks, dtype=float), bins=edges)
+        rate_hz = counts.astype(float) / (trial_count * bin_width_sec)
+        if len(rate_hz) > 2:
+            rate_hz = pd.Series(rate_hz, dtype=float).rolling(window=3, center=True, min_periods=1).mean().to_numpy()
+        psth_ax.plot(centers, rate_hz, color=color, linewidth=1.9, alpha=0.95)
+        legend_handles.append(Line2D([0], [0], color=color, linewidth=2.0, label=f"{label}"))
 
-    if psth_ax is not None:
-        psth_ax.axvline(0, color="black", linestyle="--", linewidth=1.5, alpha=0.95)
-        bin_width_sec = 0.10
-        x_min, x_max = raster_ax.get_xlim()
-        bin_edges = np.arange(x_min, x_max + bin_width_sec, bin_width_sec)
-        if len(bin_edges) < 2:
-            bin_edges = np.array([x_min, x_max + max(0.1, bin_width_sec)])
-        bin_centers = bin_edges[:-1] + (bin_width_sec / 2.0)
+    psth_ax.axvline(0, color=stim_color, linestyle="--", linewidth=1.2, alpha=0.9)
+    psth_ax.set_ylabel("Lick Rate (Hz)")
+    psth_ax.set_title("Stimulus-Aligned Lick PSTH + Outcome Faceted Raster")
+    psth_ax.grid(alpha=0.2, axis="x")
 
-        drew_psth = False
-        for outcome_code in outcome_order:
-            trial_count = outcome_counts.get(outcome_code, 0)
-            if trial_count <= 0:
-                continue
-            outcome_licks = [
-                float(lick)
-                for rec in records
-                if int(rec["outcome"]) == outcome_code
-                for lick in rec["licks_sec"]
-            ]
-            if not outcome_licks:
-                continue
-            counts, _ = np.histogram(outcome_licks, bins=bin_edges)
-            rate = counts.astype(float) / (trial_count * bin_width_sec)
-            if len(rate) > 2:
-                rate = pd.Series(rate, dtype=float).rolling(window=3, center=True, min_periods=1).mean().to_numpy()
-            psth_ax.plot(
-                bin_centers,
-                rate,
-                color=outcome_colors[outcome_code],
-                linewidth=2.0,
-                label=f"{outcome_labels[outcome_code]}",
-            )
-            drew_psth = True
+    # Raster panels.
+    for raster_ax, (label, rows, color) in zip(raster_axes, outcome_groups):
+        raster_ax.axvline(0, color=stim_color, linestyle="--", linewidth=1.1, alpha=0.9, zorder=0)
+        _plot_reward_band(raster_ax, rows)
 
-        if drew_psth:
-            psth_ax.legend(loc="upper right", ncol=2, fontsize=8, frameon=False)
-            psth_ax.set_ylabel("Lick rate (Hz)")
+        if rows:
+            for idx, rec in enumerate(rows, start=1):
+                licks = [float(v) for v in rec["licks_sec"]]
+                if licks:
+                    raster_ax.vlines(licks, idx - 0.35, idx + 0.35, color=color, linewidth=0.65, alpha=0.85, zorder=2)
+            raster_ax.set_ylim([0.5, len(rows) + 0.5])
+            raster_ax.invert_yaxis()
         else:
-            psth_ax.text(0.5, 0.5, "No lick data for PSTH", ha="center", va="center", transform=psth_ax.transAxes)
-            psth_ax.set_ylabel("Lick rate (Hz)")
-        psth_ax.set_title("Peri-Stimulus Time Histogram")
-        psth_ax.grid(alpha=0.2, axis="y")
+            raster_ax.text(0.5, 0.5, "No trials", ha="center", va="center", transform=raster_ax.transAxes, fontsize=9)
+            raster_ax.set_ylim([0.0, 1.0])
 
-    if own_fig:
-        plt.tight_layout()
-        plt.show()
+        raster_ax.set_yticks([])
+        raster_ax.set_ylabel(f"{label}\n(n={len(rows)})", fontsize=9)
+        raster_ax.grid(alpha=0.2, axis="x")
+
+    raster_axes[-1].set_xlabel("Time from Stimulus Onset (s)")
+
+    # Figure-level legend.
+    legend_handles.append(
+        Line2D([0], [0], color=stim_color, linestyle="--", linewidth=1.2, label="Stimulus Onset (t=0)")
+    )
+    legend_handles.append(Line2D([0], [0], color=reward_color, linewidth=1.2, label="Reward Median"))
+    legend_handles.append(Patch(facecolor=reward_color, alpha=0.12, edgecolor="none", label="Reward IQR"))
+    fig.legend(handles=legend_handles, loc="upper right", frameon=False, fontsize=8)
+
+    for axis in [psth_ax] + raster_axes:
+        axis.set_xlim([x_min, x_max])
+
+    fig.subplots_adjust(top=0.94, right=0.82, hspace=0.12)
+    plt.show()
     return total_points
 
 
